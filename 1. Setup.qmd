@@ -1,0 +1,347 @@
+---
+title: "Debris Removal Process Setup Nodes and Edges"
+author: "Leanh Nguyen (Ln14)"
+
+date: 2024-11-27
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+  jupyter: python3
+---
+
+{{< pagebreak >}}
+
+# Setup
+
+## Import Libraries
+
+```{python}
+import pulp
+import pandas as pd
+import networkx as nx
+import matplotlib.pyplot as plt
+
+import osmnx as ox
+import geopandas as gpd
+from shapely import wkt
+
+from shapely.geometry import Point, LineString
+```
+
+```{python}
+# Check the current working directory
+print("Current Working Directory:", os.getcwd())
+
+# Set the working directory to the project root if necessary
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris_Removal_Process')
+```
+
+## Datasets
+
+```{python}
+# Load Thompson's daily deebris activity report
+daily_path = r'input\Lee_Country_Daily_Report.xlsx'
+
+# Load debris load locations
+load_path = r'input\Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv'
+
+# Load debris pile data
+debris_path = r'input\piles_30oct2023a.csv'
+
+# Load DMS locations
+DMS_path = r'input\DMS.csv'
+DMS_df = pd.read_csv(DMS_path)
+
+# Load fire station, fueling site, and hospital locations
+fire_station_path = r'input\fire_station.csv'
+fire_stations_df = pd.read_csv(fire_station_path)
+
+# Load filtered nodes and edges files
+nodes_path = r'input\Network_edges_filtered.csv' 
+edges_path = r'input\Network_nodes_filtered.csv'
+nodes_df = pd.read_csv(nodes_path)
+edges_df = pd.read_csv(edges_path)
+
+# Load filtered (critical) nodes, edges, and debris piles of focus area
+focus_area_nodes_path = r'input\focus area\focus_area_nodes.csv' 
+focus_area_edges_path = r'input\focus area\focus_area_edges.csv'
+focus_area_debris_path = r'input\focus area\focus_area_piles.csv'
+focus_area_fire_station_path = r'input\focus area\focus_area_fire_station.csv'
+focus_area_dms_path = r'input\focus area\focus_area_dms.csv'
+focus_area_loads_path = r'input\focus area\focus_area_loads.csv'
+
+focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
+focus_area_edges_df = pd.read_csv(focus_area_edges_path)
+focus_area_debris_df = pd.read_csv(focus_area_debris_path)
+focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
+focus_area_dms_df = pd.read_csv(focus_area_dms_path)
+focus_area_loads_df = pd.read_csv(focus_area_loads_path)
+```
+
+```python
+# Check crs
+print("Node CRS:", focus_area_nodes_gdf.crs)
+```
+
+{{< pagebreak >}}
+
+# Assigning Values
+
+## Focus Area
+
+```{python}
+# Convert nodes to GeoDataFrames using the WKT column
+focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads)
+focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326")
+
+# Convert edges to GeoDataFrames using the WKT column
+focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads)
+focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326")
+
+
+
+
+# Convert fire station data to GeoDataFrames
+focus_area_fire_station_df['geometry'] = focus_area_fire_station_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1)
+
+focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geometry='geometry', crs="EPSG:4326")
+
+print(focus_area_fire_station_gdf.head())
+
+# Find nearest nodes for fire stations
+foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
+
+print(foucs_area_fire_station_to_node.head())
+
+# Rename columns for excek
+foucs_area_fire_station_to_node = foucs_area_fire_station_to_node.rename(columns={
+    'y': 'node_latitude', 
+    'x': 'node_longitude'
+})
+
+# Select only the relevant columns
+foucs_area_fire_station_to_node = foucs_area_fire_station_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']]
+
+# Save outputs to CSV file
+foucs_area_fire_station_to_node.to_csv("output/focus_area_fire_station_node.csv", index=False)
+```
+
+DMS
+
+```{python}
+# Convert DMS data to GeoDataFrames using Longitude and Latitude columns
+focus_area_dms_df['geometry'] = focus_area_dms_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1)
+
+focus_area_dms_gdf = gpd.GeoDataFrame(focus_area_dms_df, geometry='geometry', crs="EPSG:4326")
+
+print(focus_area_dms_gdf.head())
+
+# Find nearest nodes for DMS locations
+focus_area_dms_to_node = gpd.sjoin_nearest(focus_area_dms_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
+
+print(focus_area_dms_to_node.head())
+
+# Rename columns for excel
+focus_area_dms_to_node = focus_area_dms_to_node.rename(columns={
+    'y': 'node_latitude', 
+    'x': 'node_longitude'
+})
+
+# Select only the relevant columns
+focus_area_dms_to_node = focus_area_dms_to_node[['Disposal Site', 'Address 1', 'Citation', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']]
+
+# Save outputs to CSV file
+focus_area_dms_to_node.to_csv("output/focus_area_dms_node.csv", index=False)
+
+```
+
+
+{{< pagebreak >}}
+
+## Debris Assignment
+
+```{python}
+target_date = "10/19/2022"  # Define your target date as a string
+
+# Convert 'Load Date' column to datetime objects if it's not already
+focus_area_loads_df['Load Date'] = pd.to_datetime(focus_area_loads_df['Load Date'])
+
+# Filter the DataFrame for the target date
+focus_area_loads_df = focus_area_loads_df[focus_area_loads_df['Load Date'].dt.strftime('%m/%d/%Y') == target_date]
+
+
+
+
+
+# Convert debris data to GeoDataFrames using Load Latitude and Load Longitude columns
+focus_area_loads_df['geometry'] = focus_area_loads_df.apply(
+    lambda row: Point(row['Load Longitude'], row['Load Latitude']),
+    axis=1
+)
+focus_area_loads_gdf = gpd.GeoDataFrame(focus_area_loads_df, geometry='geometry', crs="EPSG:4326")
+
+print(focus_area_loads_gdf.head())
+
+# Find nearest nodes for debris locations
+focus_area_loads_to_node = gpd.sjoin_nearest(focus_area_loads_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
+
+print(focus_area_loads_to_node.head())
+
+# Sum the "CYD" values for each node by grouping by the index of the nodes GeoDataFrames
+cyd_sum_per_node = focus_area_loads_to_node.groupby('index_right')['CYD'].sum()
+
+# Assign this sum as a new column
+focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf.index.map(cyd_sum_per_node).fillna(0)
+
+# Export the updated nodes GeoDataFrame to a CSV file
+focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv("output/focus_area_NodalLoads.csv", index=False)
+```
+
+{{< pagebreak >}}
+
+## Debris: Nodes to Edges Assignment
+
+```{python}
+# Load nodal loads of focus area
+focus_area_NodalLoads_path = r'output\focus_area_NodalLoads.csv'
+
+focus_area_NodalLoads_df = pd.read_csv(focus_area_NodalLoads_path)
+
+# Convert nodal loads data to GeoDataFrames
+focus_area_NodalLoads_df['geometry'] = focus_area_NodalLoads_df.apply(lambda row: Point(row['x'], row['y']), axis=1)
+
+focus_area_NodalLoads_gdf = gpd.GeoDataFrame(focus_area_NodalLoads_df, geometry='geometry', crs="EPSG:4326")
+
+print(focus_area_NodalLoads_gdf.head())
+
+# Create a dictionary mapping each node to its total_CYD
+node_cyd_dict = focus_area_NodalLoads_df.set_index('osmid')['total_CYD'].to_dict()
+
+# Count edges connected to each node (both u and v)
+
+# First, count connections for 'u' nodes
+u_edge_counts = focus_area_edges_df['u'].value_counts()
+print(u_edge_counts)
+
+# Count connections for 'v' nodes and add to u_edge_counts
+edge_counts = u_edge_counts.add(focus_area_edges_df['v'].value_counts(), fill_value=0)
+print(edge_counts)
+
+# Convert edge_counts to a dictionary
+edge_counts_dict = edge_counts.to_dict()
+
+# Calculate load split for each edge
+# Define a function to get the load per edge based on u and v nodes
+def calculate_edge_load(row):
+    u, v = row['u'], row['v']
+    
+    # Get the total_CYD for each node, or assugb 0 if the node has no associated debris data
+    u_cyd = node_cyd_dict.get(u, 0)
+    v_cyd = node_cyd_dict.get(v, 0)
+    
+    # Get the number of edges connected to each node
+    u_edge_count = edge_counts_dict.get(u, 1)  # Default to 1 to avoid division by zero
+    v_edge_count = edge_counts_dict.get(v, 1)
+    
+    # Calculate load contribution from each node to this edge
+    u_contribution = u_cyd / u_edge_count if u_edge_count > 0 else 0
+    v_contribution = v_cyd / v_edge_count if v_edge_count > 0 else 0
+    
+    # Total load for the edge is the sum of contributions from u and v nodes
+    return u_contribution + v_contribution
+
+# Apply the function to each edge
+focus_area_edges_df['split_CYD'] = focus_area_edges_df.apply(calculate_edge_load, axis=1)
+
+# Select only the relevant columns and export to a new CSV
+focus_area_edges_df[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'split_CYD']].to_csv('output/focus_area_EdgeLoads.csv', index=False)
+
+# Load the edge loads data
+focus_area_EdgeLoads_path = r'output\focus_area_EdgeLoads.csv'
+
+focus_area_EdgeLoads_df = pd.read_csv(focus_area_EdgeLoads_path)
+
+# Sort each pair of nodes in u and v, so that (u, v) and (v, u) appear consistently as (min, max)
+focus_area_EdgeLoads_df['node_pair'] = focus_area_EdgeLoads_df.apply(lambda row: tuple(sorted((row['u'], row['v']))), axis=1)
+
+# Keep the first osmid and the relevant columns of the first excel
+combined_edges = focus_area_EdgeLoads_df.groupby('node_pair').agg({
+    'osmid': 'first', 'u': 'first', 'v': 'first', 'name': 'first', 'WKT': 'first', 'fid': 'first', 'highway': 'first', 'oneway': 'first', 'reversed': 'first', 'length': 'first', 'lanes': 'first', 'ref': 'first', 'access': 'first', 'service': 'first', 'maxspeed': 'first', 'bridge': 'first', 'junction': 'first', 'tunnel': 'first', 'area': 'first', 'width': 'first', 'split_CYD': 'sum'         
+}).reset_index(drop=True)
+
+# Rename columns for excel
+combined_edges = combined_edges.rename(columns={'split_CYD': 'total_split_CYD'})
+
+# Select only the relevant columns and export to a new CSV
+combined_edges[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'total_split_CYD']].to_csv('output/focus_area_EdgeLoads_Combined.csv', index=False)
+
+```
+
+## Truck Assignment
+I want to extract data from Lee_Country_Daily_Report.xlsx from my input file. Then, I want to extract data from the "Truck" sheet. IN this sheet, there is a "Date" column, "Haul in/out" column, and "Data" column. However, the dates repeat twice because in the Haul in/out column, there is data for "10/19 Haul in Trucks/Trailers:" and "10/19 Haul out Trucks/Trailers:" But for now, i just want the data from 10/19/2022 as my focus area.
+
+I want to extract data from Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv from my input file. This file has a "Load Date" column and "Disposal Site" column and "CYD" column. I only want to use the data from 10/19/2022 for my focus area. However, the disposal site column has names that repeat, so i want to combine the repeated disposal sites into one and add their total cyd. Place this data in a new excel file  called "Truck Assignment.csv". 
+
+Then using the data from the haul in and haul out truck for 10/19, I want to distribute the amount of haul in trucks proportionately to all of the disposal sites based on their CYD. For example if there were 6 trucks on 10/19/2022 and 3 disposal sites. Site A would get 3 trucks, B get 2 trucks, and C get 1 truck if the ratio of A, B, and C's CYD was 3:2:1
+
+Then, I want to place this data in the excel file "Truck Assignment.csv" as a new column for each disposal site on 10/19/2022
+
+```{python}
+# Load the Truck sheet from the Excel file
+truck_data = pd.read_excel(daily_path, sheet_name="Truck")
+truck_data = truck_data[truck_data["Date"] == "10/19/2022"]
+haul_in_trucks = truck_data[truck_data["Haul in/out"].str.contains("Haul in", case=False, na=False)]
+# print(haul_in_trucks)
+
+# Load the disposal site data from the CSV
+disposal_data = pd.read_csv(load_path)
+disposal_data = disposal_data[disposal_data["Load Date"] == "10/19/2022"]
+
+# Group by Disposal Site and sum up the CYD
+disposal_summary = disposal_data.groupby("Disposal Site", as_index=False)["CYD"].sum()
+# print(disposal_summary)
+
+# Calculate total number of Haul In Trucks
+total_trucks = haul_in_trucks["Data"].sum()
+print(total_trucks)
+
+# Calculate proportion of CYD for each site
+disposal_summary["Proportion"] = disposal_summary["CYD"] / disposal_summary["CYD"].sum()
+
+# Assign trucks based on CYD proportion
+disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round()
+
+# Add the Load Date column
+disposal_summary.insert(0, "Load Date", "10/19/2022")
+
+# Assign trucks based on CYD proportion
+disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round()
+
+# Save the output to a new Excel file
+disposal_summary.to_csv("output/Truck Assignment.csv", index=False)
+```
+
