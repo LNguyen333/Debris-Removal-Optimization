@@ -2,7 +2,7 @@
 title: "Debris Removal Process Setup Nodes and Edges"
 author: "Leanh Nguyen (Ln14)"
 
-date: 2024-11-27
+date: 2025-03-27
 
 format: 
     html: default
@@ -35,35 +35,32 @@ execute:
 
 {{< pagebreak >}}
 
-# Setup
-
-## Import Libraries
+# Import Libraries
 
 ```{python}
 import pulp
 import pandas as pd
-import networkx as nx
-import matplotlib.pyplot as plt
-
-import osmnx as ox
 import geopandas as gpd
 from shapely import wkt
-
 from shapely.geometry import Point, LineString
 ```
+
+Notes:
+- os.chdir(): changes the current working directory to a specific path
+- os.getcwd(): gets current working directory
 
 ```{python}
 # Check the current working directory
 print("Current Working Directory:", os.getcwd())
 
 # Set the working directory to the project root if necessary
-os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris_Removal_Process')
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
 ```
 
-## Datasets
+# Import Data
 
 ```{python}
-# Load Thompson's daily deebris activity report
+# Load Thompson's daily debris activity report of Crowder Gulf
 daily_path = r'input\Lee_Country_Daily_Report.xlsx'
 
 # Load debris load locations
