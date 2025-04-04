@@ -136,7 +136,7 @@ focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry'
 - Same as before but for edges
 
 ```{python}
-# Convert fire station data to GeoDataFrames using the WKT column
+# Convert fire station data to GeoDataFrames using Longitude and Latitude columns
 focus_area_fire_station_df['geometry'] = focus_area_fire_station_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [c1]
 
 focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geometry='geometry', crs="EPSG:4326") # [c2]
@@ -150,6 +150,8 @@ focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geome
     - For each row, it accesses the 'Longitude' and 'Latitude' values and creates a Point object from the shapely.geometry module. Order is (longitude, latitude)
 [c2]
 - Same as before but for fire stations
+
+## Assign to nearest nodes
 
 ```{python}
 # Find nearest nodes to fire stations
@@ -165,36 +167,51 @@ foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf,
 - how="left": Specifies the type of join. 
     - A "left" join ensures that all rows from the focus_area_fire_station_gdf are kept in the resulting foucs_area_fire_station_to_node DataFrame. 
     - If a nearest node is found, its attributes are added; otherwise, the added columns will have NaN values.
-
+- distance_col="distance_to_node": Adds a new column named "distance_to_node" to the resulting DataFrame. 
+    - Contain the spatial distance between each fire station and its nearest node.
 
 
 ```{python}
-
-
-
-
 # Rename columns for excel
 foucs_area_fire_station_to_node = foucs_area_fire_station_to_node.rename(columns={
     'y': 'node_latitude', 
     'x': 'node_longitude'
-})
+}) # [e1]
 
 # Select only the relevant columns
-foucs_area_fire_station_to_node = foucs_area_fire_station_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']]
+foucs_area_fire_station_to_node = foucs_area_fire_station_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [e2]
 
 # Save outputs to CSV file
-foucs_area_fire_station_to_node.to_csv("output/focus_area_fire_station_node.csv", index=False)
+foucs_area_fire_station_to_node.to_csv(r'C:\Users\leanh\Documents\Storm Debris Removal\output\1. Setup\focus_area_fire_station_node.csv', index=False) # [e3]
 ```
 
-DMS
+[e1]
+- Replaces y and x to node_latitude and node_longitude, respectively
+
+[e2]
+- Creates new DataFrame containing only the columns listed within [[ ]]
+    - 'Name': The name of the fire station.
+    - 'Address': The address of the fire station.
+    - 'Latitude': The original latitude of the fire station.
+    - 'Longitude': The original longitude of the fire station.
+    - 'distance_to_node': The calculated distance between the fire station and its nearest network node.
+    - 'osmid': The OpenStreetMap ID (or a similar unique identifier) of the nearest network node.
+    - 'node_latitude': The latitude of the nearest network node (which was renamed from 'y').
+    - 'node_longitude': The longitude of the nearest network node (which was renamed from 'x').
+
+[e3]
+- index=False: tells pandas not to write the DataFrame's index as a column in the CSV file. 
+    - To keep the CSV file cleaner and only include the actual data columns.
+
+## DMS
 
 ```{python}
 # Convert DMS data to GeoDataFrames using Longitude and Latitude columns
-focus_area_dms_df['geometry'] = focus_area_dms_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1)
+focus_area_dms_df['geometry'] = focus_area_dms_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [f1] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each fire station in focus_area_fire_station_gdf
 
 focus_area_dms_gdf = gpd.GeoDataFrame(focus_area_dms_df, geometry='geometry', crs="EPSG:4326")
 
-print(focus_area_dms_gdf.head())
+# print(focus_area_dms_gdf.head())
 
 # Find nearest nodes for DMS locations
 focus_area_dms_to_node = gpd.sjoin_nearest(focus_area_dms_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
@@ -211,23 +228,49 @@ focus_area_dms_to_node = focus_area_dms_to_node.rename(columns={
 focus_area_dms_to_node = focus_area_dms_to_node[['Disposal Site', 'Address 1', 'Citation', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']]
 
 # Save outputs to CSV file
-focus_area_dms_to_node.to_csv("output/focus_area_dms_node.csv", index=False)
-
+focus_area_dms_to_node.to_csv(r'C:\Users\leanh\Documents\Storm Debris Removal\output\1. Setup\focus_area_dms_node.csv', index=False)
 ```
 
+- Similar to previous code blocks except for DMS
 
 {{< pagebreak >}}
 
-## Debris Assignment
+# Focus Area: Assign Debris
 
 ```{python}
 target_date = "10/19/2022"  # Define your target date as a string
 
 # Convert 'Load Date' column to datetime objects if it's not already
-focus_area_loads_df['Load Date'] = pd.to_datetime(focus_area_loads_df['Load Date'])
+focus_area_loads_df['Load Date'] = pd.to_datetime(focus_area_loads_df['Load Date']) # [g1]
 
 # Filter the DataFrame for the target date
-focus_area_loads_df = focus_area_loads_df[focus_area_loads_df['Load Date'].dt.strftime('%m/%d/%Y') == target_date]
+focus_area_loads_df = focus_area_loads_df[focus_area_loads_df['Load Date'].dt.strftime('%m/%d/%Y') == target_date] # [g2]
+```
+
+[g1]
+- pd.to_datetime(): Converts values in the 'Load Date' column of the focus_area_loads_df DataFrame into datetime objects.
+
+[g2]
+- focus_area_loads_df[...]: Uses the boolean Series to index the focus_area_loads_df DataFrame. 
+    - Only the rows where the boolean Series is True (meaning the 'Load Date' matches the target_date) are kept in the updated focus_area_loads_df DataFrame.
+- .dt: Special accessor that allows access to datetime-like properties of a Series (a single column of a DataFrame).
+- .strftime('%m/%d/%Y'): Formats each datetime object in the 'Load Date' column into a string with the specific format 'month/day/year' (e.g., "10/19/2022"). 
+    - To ensure a direct string comparison with the target_date string.
+- == target_date: Compares the formatted date string from the 'Load Date' column with the target_date string. 
+    - This comparison results in a boolean Series (True for rows where the dates match, False otherwise).
+
+```{python}
+
+```
+
+```{python}
+target_date = "10/19/2022"  # Define your target date as a string
+
+# Convert 'Load Date' column to datetime objects if it's not already
+focus_area_loads_df['Load Date'] = pd.to_datetime(focus_area_loads_df['Load Date']) # [g1]
+
+# Filter the DataFrame for the target date
+focus_area_loads_df = focus_area_loads_df[focus_area_loads_df['Load Date'].dt.strftime('%m/%d/%Y') == target_date] # [g2]
 
 
 
@@ -259,7 +302,7 @@ focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv("output/focus_area
 
 {{< pagebreak >}}
 
-## Debris: Nodes to Edges Assignment
+## Nodes to Edges Assignment
 
 ```{python}
 # Load nodal loads of focus area

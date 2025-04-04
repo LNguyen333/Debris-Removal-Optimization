@@ -1,0 +1,884 @@
+---
+title: "Debris Removal Optimization Using Heuristics"
+author: "Leanh Nguyen (Ln14)"
+
+date: 2024-12-2
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+  jupyter: python3
+---
+
+{{< pagebreak >}}
+
+# Setup
+
+## Import Libraries
+
+```{python}
+from pulp import *
+import pandas as pd
+import networkx as nx
+import matplotlib.pyplot as plt
+
+import osmnx as ox
+import geopandas as gpd
+from shapely import wkt
+import math
+
+import numpy as np
+import random
+import copy
+
+from shapely.geometry import Point, LineString
+
+# Check the current working directory
+print("Current Working Directory:", os.getcwd())
+
+# Set the working directory to the project root if necessary
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris_Removal_Process')
+```
+
+## Datasets
+
+```{python}
+# Load Thompson's daily deebris activity report
+daily_path = r'input\Lee_Country_Daily_Report.xlsx'
+daily_summary = pd.read_excel(daily_path, sheet_name="Daily Summary Updated")
+
+# Load debris load locations
+load_path = r'input\Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv'
+
+# Load debris pile data
+debris_path = r'input\piles_30oct2023a.csv'
+
+# Load DMS location
+DMS_path = r'input\DMS.csv'
+DMS_df = pd.read_csv(DMS_path)
+
+# Load fire station, fueling site, and hospital locations
+fire_station_path = r'input\fire_station.csv'
+fire_stations_df = pd.read_csv(fire_station_path)
+
+# Load filtered nodes and edges files
+nodes_path = r'input\Network_edges_filtered.csv' 
+edges_path = r'input\Network_nodes_filtered.csv'
+nodes_df = pd.read_csv(nodes_path)
+edges_df = pd.read_csv(edges_path)
+
+# Load filtered (critical) nodes, edges, and debris piles of focus area
+focus_area_nodes_path = r'input\focus area\focus_area_nodes.csv' 
+focus_area_edges_path = r'input\focus area\focus_area_edges.csv'
+focus_area_debris_path = r'input\focus area\focus_area_piles.csv'
+focus_area_fire_station_path = r'input\focus area\focus_area_fire_station.csv'
+focus_area_dms_path = r'input\focus area\focus_area_dms.csv'
+focus_area_loads_path = r'input\focus area\focus_area_loads.csv'
+
+focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
+focus_area_edges_df = pd.read_csv(focus_area_edges_path)
+focus_area_debris_df = pd.read_csv(focus_area_debris_path)
+focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
+focus_area_dms_df = pd.read_csv(focus_area_dms_path)
+focus_area_loads_df = pd.read_csv(focus_area_loads_path)
+
+# Step 1: Load Data from Excel Files from the outputs of 1. Setup
+# File paths 
+
+focus_area_EdgeLoads_Combined = r'output\focus_area_EdgeLoads_Combined.csv'
+focus_area_dms_node = r'output\focus_area_dms_node.csv'
+focus_area_fire_station_node = r'output\focus_area_fire_station_node.csv'
+truck_assignment = r'output\Truck Assignment.csv'
+
+focus_area_EdgeLoads_Combined_df = pd.read_csv(focus_area_EdgeLoads_Combined)
+focus_area_dms_node_df = pd.read_csv(focus_area_dms_node)
+focus_area_fire_station_node_df = pd.read_csv(focus_area_fire_station_node)
+truck_assignment_df = pd.read_csv(truck_assignment)
+```
+
+# Daily Report Data
+
+```{python}
+# Extract Data from Daily Report
+focus_date = "10/19/2022"
+filtered_data = daily_summary[daily_summary["Date"] == focus_date]
+print(filtered_data)
+
+avg_loads_per_truck = filtered_data[filtered_data['Daily Summary'].str.contains("Average Loads per Truck/Trailer", case=False, na=False)]
+
+avg_loads_per_truck = int(avg_loads_per_truck['Data'].values[0]) if not avg_loads_per_truck.empty else 0
+
+avg_load_by_CYD = filtered_data[filtered_data['Daily Summary'].str.contains("Average Load by CYD", case=False, na=False)]
+
+avg_load_by_CYD = int(avg_load_by_CYD['Data'].values[0]) if not avg_load_by_CYD.empty else 0
+
+truck_capacity = avg_loads_per_truck * avg_load_by_CYD
+print(truck_capacity)
+```
+
+```{python}
+# Extract Data from Truck Assignment
+truck_assignment_df["CYD"] = truck_assignment_df["CYD"].astype(int)
+truck_assignment_df["Assigned Trucks"] = truck_assignment_df["Assigned Trucks"].astype(int)
+print(truck_assignment_df)
+```
+
+```{python}
+# Ensure node names match those in the graph
+
+# This code creates a dictionary (dms_dict) that maps disposal site names to their latitude, longitude, and OSM node ID.
+dms_dict = {
+    row["Disposal Site"].lower().replace(" ", "_"): (row["node_latitude"], row["node_longitude"], row["osmid"])
+    for _, row in focus_area_dms_node_df.iterrows()
+}
+    # row["Disposal Site"].lower().replace(" ", "_")
+        # Retrieves the disposal site name from focus_area_dms_node_df
+        # Converts it to lowercase (.lower()) to maintain consistency.
+        # Replaces spaces with underscores (.replace(" ", "_")) for cleaner key formatting.
+    # (row["node_latitude"], row["node_longitude"], row["osmid"])
+        #   Each disposal site is mapped to a tuple containing:
+            # node_latitude → The latitude of the disposal site
+            # node_longitude → The longitude of the disposal site.
+            # osmid → The OpenStreetMap (OSM) node ID for the disposal site.
+    # for _, row in focus_area_dms_node_df.iterrows()
+        # iterrows() iterates over each row in the DataFrame.
+        # _ is used to ignore the index.
+        # row represents a single row of data.
+
+fire_station_dict = {
+    row["Name"].lower().replace(" ", "_"): (row["node_latitude"], row["node_longitude"], row["osmid"])
+    for _, row in focus_area_fire_station_node_df.iterrows()
+}
+
+print(dms_dict)
+print(fire_station_dict)
+```
+
+```{python}
+
+edge_dict = {} #  Initialize an Empty Dictionary
+
+for _, row in focus_area_EdgeLoads_Combined_df.iterrows(): # Loop Through Each Row in focus_area_EdgeLoads_Combined_df
+    # The _ is a placeholder because we don’t need the row index.
+    key = row["name"] # Stores the road name (used as a dictionary key).
+    value = (row["u"], row["v"], float(row["length"]), float(row["total_split_CYD"])) # a tuple
+    # Add the Data to edge_dict
+    if key in edge_dict: # If the road key already exists in edge_dict, the new value (edge data) is appended to the existing list.
+        edge_dict[key].append(value)  # Append to existing list
+    else: # If it does not exist, a new list is created with the first edge entry.
+        edge_dict[key] = [value]  # Initialize new list
+total_edges = sum(len(v) for v in edge_dict.values())
+
+print(edge_dict)
+print(total_edges)
+```
+
+```{python}
+node_dict = {
+    row["osmid"]: (row["y"], row["x"], row["street_count"])
+    for _, row in focus_area_nodes_df.iterrows()
+}
+
+print(node_dict)
+print(len(node_dict))
+```
+
+```{python}
+# Create Network Graph
+graph = nx.Graph() # 1. Create an Empty Directed Graph
+    # nx.DiGraph() creates a directed graph (DiGraph), meaning edges have a direction (from u to v). This is useful for modeling roads where travel may be one-way.
+for road, segments in edge_dict.items(): # 2️. Loop Through Each Road and Its Segments
+    for u, v, length, debris in segments: # 3. Extract Data from Each Segment
+        if u in node_dict and v in node_dict: # 4. Check If Nodes Exist in node_dict 
+            # graph.add_edge(u, v, length=length, debris=debris) # 5. Add the Edge to the Graph
+            graph.add_edge(str(u), str(v), length=length, debris=debris)
+```
+
+THIS IS GOOD
+
+```{python}
+def find_quickest_path(graph, start_node, end_node, truck_capacity, truck_speed=11.2, clearance_speed=0.1):
+    """
+    Finds the quickest path between two nodes in a graph, considering truck capacity and debris removal.
+
+    Args:
+        graph (nx.Graph): The graph representing the network.
+        start_node (int): The starting node.
+        end_node (int): The destination node.
+        truck_capacity (int): The capacity of each truck.
+        num_trucks (int): The number of trucks available.
+        truck_speed (float, optional): The speed of the trucks. Defaults to 11.2.
+        clearance_speed (float, optional): The speed at which debris is cleared. Defaults to 0.1.
+
+    Returns:
+        tuple: A tuple containing the total travel time, a list of all edges traveled by all trucks, and a list of all nodes visited by all trucks.
+    """
+
+    try:
+        # Find the shortest path using Networkx's shortest_path function, considering edge lengths as weights.
+        path = nx.shortest_path(graph, source=str(start_node), target=str(end_node), weight='length')
+    except nx.NetworkXNoPath:
+        # If no path is found, print a message and return infinity for travel time, empty lists, and an empty dictionary.
+        print(f"No path found between {start_node} and {end_node}. Skipping.")
+        return float('inf'), [], [], {}  # Return infinity if no path, along with empty lists for edges, nodes, and an empty dictionary for node capacities
+    
+    # Initialize the total travel time.
+    travel_time = 0
+
+    # Initialize a dictionary to store the routes for each truck.
+    truck_routes = {truck: {"edges": [], "nodes": [start_node], "capacity": 0} for truck in range(num_trucks)}
+
+    # Keep track of the order in which trucks are used.
+    truck_order = list(range(num_trucks))
+
+    # Initialize the index of the currently used truck.
+    current_truck_index = 0
+
+    # Initialize a dictionary to track the remaining debris on each edge.
+    remaining_debris = { (u, v): graph[u][v]['debris'] for u, v in zip(path[:-1], path[1:]) }
+
+    # Iterate through the edges of the shortest path.
+    for u, v in zip(path[:-1], path[1:]):
+
+        # Get the data for the current edge.
+        edge_data = graph[u][v]
+
+        # Skip if the edge is already cleared or has no data.
+        if not edge_data or remaining_debris[(u, v)] == 0:
+            continue
+        
+        # Add the travel time for the edge.
+        travel_time += edge_data['length'] / truck_speed
+
+        # Get the amount of debris on the edge, rounded up.
+        debris_on_edge = math.ceil(remaining_debris[(u, v)])
+
+        # Continue clearing debris until the edge is clear.
+        while debris_on_edge > 0:
+
+            # Get the currently used truck.
+            current_truck = truck_order[current_truck_index]
+
+            # Calculate the amount of debris that can be collected by the current truck.
+            collectable = min(debris_on_edge, truck_capacity - truck_routes[current_truck]["capacity"], 10)
+            
+            # If there is debris to collect.
+            if collectable > 0:
+
+                # Update the truck's capacity.
+                truck_routes[current_truck]["capacity"] += collectable
+                
+                # Reduce the amount of debris on the edge.
+                debris_on_edge -= collectable
+                
+                # Update the remaining debris on the edge.
+                remaining_debris[(u, v)] -= collectable
+
+                # Add the clearance time.
+                travel_time += collectable / clearance_speed
+                
+                # Add the edge and node to the truck's route.
+                truck_routes[current_truck]["edges"].append((u, v, truck_routes[current_truck]["capacity"], current_truck))
+                truck_routes[current_truck]["nodes"].append(v)
+                
+                # If the truck is full.
+                if truck_routes[current_truck]["capacity"] == truck_capacity:
+                    try:
+                        # Find the shortest return path to the starting node.
+                        return_path = nx.shortest_path(graph, v, start_node, weight='length')
+
+                        # Add the return travel time.
+                        travel_time += nx.shortest_path_length(graph, v, start_node, weight='length') / truck_speed
+
+                        # Add the return path edges and nodes to the truck's route.
+                        truck_routes[current_truck]["edges"].extend([(return_path[i], return_path[i+1], truck_routes[current_truck]["capacity"], current_truck) for i in range(len(return_path)-1)])
+                        truck_routes[current_truck]["nodes"].extend(return_path[1:])
+
+                    except nx.NetworkXNoPath:
+                        # If no return path is found, print a message.
+                        print(f"No return path found from {v} to {start_node}. Skipping return trip.")
+
+                    # Move the truck to the back of the queue and reset its capacity.
+                    truck_routes[current_truck]["capacity"] = 0
+                    truck_order.append(truck_order.pop(current_truck_index))
+                    
+                    # Reset the current truck index to the front of the queue
+                    current_truck_index = 0
+                    continue #continue to the next edge
+            
+            # Handle leftover debris.
+            if debris_on_edge < 10 and debris_on_edge > 0:
+                collectable = debris_on_edge
+                truck_routes[current_truck]["capacity"] += collectable
+                remaining_debris[(u, v)] -= collectable  # Update debris left on edge
+                debris_on_edge = 0
+                travel_time += collectable * (clearance_speed/10)
+
+                truck_routes[current_truck]["edges"].append((u, v, truck_routes[current_truck]["capacity"], current_truck))
+                truck_routes[current_truck]["nodes"].append(v)
+
+
+                # Move truck to the back of the queue
+                truck_routes[current_truck]["capacity"] = 0
+
+                truck_order.append(truck_order.pop(current_truck_index))
+                current_truck_index = 0
+                continue #continue to the next edge
+            
+            # Move to the next truck in the queue.
+            current_truck_index = (current_truck_index + 1) % len(truck_order)
+        
+        # Check if all trucks are full
+        if all(route["capacity"] == truck_capacity for route in truck_routes.values()):
+            break
+
+    all_edges = []
+    all_nodes = []
+
+    # Collect all edges and nodes from all truck routes.
+    for truck_id, route in truck_routes.items():
+        for u, v, capacity, truck in route["edges"]:
+            all_edges.append((u, v, capacity, truck))
+        for node in route["nodes"]:
+            capacity = 0 # Initialize capacity for the node
+            
+            # Find the capacity relevant to the truck and node.
+            for edge_u, edge_v, edge_capacity, edge_truck_id in all_edges:
+                if edge_truck_id == truck_id and edge_v == node:
+                    capacity = edge_capacity
+                    break
+            all_nodes.append((node, capacity, truck_id)) # Add truck_id to nodes data
+
+    return travel_time, all_edges, all_nodes # Return the total travel time, all edges, and all nodes.
+```
+
+```{python}
+# Define LP Problem
+problem = LpProblem("Debris Removal Optimization", LpMinimize)
+```
+
+```{python}
+# This code creates a dictionary (truck_vars) that maps disposal sites to the number of trucks assigned to them.
+
+truck_vars = {} # Initialize an empty dictionary
+    # This will store the disposal sites as keys and assigned truck counts as values.
+
+for _, row in truck_assignment_df.iterrows(): # Loop through each row in truck_assignment_df
+    # truck_assignment_df.iterrows() iterates through the DataFrame row by row.
+    # _ (underscore) is used to ignore the row index
+    # row represents a single row of data.
+
+    disposal_site = row["Disposal Site"].lower().replace(" ", "_")
+    
+        # Gets the disposal site name from the row.
+        # .lower() ensures case insensitivity (e.g., "Site A" and "site a" are treated the same).
+    print(disposal_site)
+    if disposal_site in dms_dict: # Check if the disposal site exists in dms_dict
+        # dms_dict is a dictionary of disposal management sites.
+        # This ensures only valid disposal sites are included in truck_vars
+
+        truck_vars[disposal_site] = row["Assigned Trucks"]
+            # Store the number of assigned trucks
+            # Adds an entry to the dictionary
+            # The key is the disposal site name (lowercased) and The value is the number of assigned trucks
+
+print(truck_vars)
+```
+
+```{python}
+total_time = 0
+
+# __NEW ADDITION__
+all_routes_data = []
+# __NEW ADDITION__
+
+
+for disposal_site, trucks in truck_vars.items():
+    disposal_site_node = str(dms_dict[disposal_site][2])
+
+    for fire_station in fire_station_dict.keys():
+        fire_station_node = str(fire_station_dict[fire_station][2])
+        num_trucks = trucks # Define num_trucks here, inside the loop
+        
+        # __NEW ADDITION__
+        shortest_time, edges_traveled, nodes_traveled = find_quickest_path(graph, disposal_site_node, fire_station_node, truck_capacity, num_trucks)
+        # __NEW ADDITION__
+
+        total_time += shortest_time
+        print(f"Time from {disposal_site} to {fire_station}: {shortest_time}") # Print individual times
+        print(f"Current Total Time: {total_time}") # Print current total time
+
+        # __NEW ADDITION__
+        for truck_id in range(num_trucks):
+            truck_route_data = {
+                "truck_id": f"{disposal_site}-{fire_station}-{truck_id}",
+                "disposal_site": disposal_site,
+                "fire_station": fire_station,
+                "edges": edges_traveled,
+                "nodes": nodes_traveled
+            }
+            # "node_capacities": node_capacities # include node capacities in the route data
+            all_routes_data.append(truck_route_data)
+        # __NEW ADDITION__
+        
+```
+
+```{python}
+# Define Constraints
+# solve
+problem += total_time, "Total Time to Clear Critical Nodes"
+```
+
+```{python}
+# Solve Optimization Problem
+problem.writeLP("Debris_Removal_Optimization.lp")
+
+problem.solve()
+status = LpStatus[problem.status]
+print("Status:", status)
+
+```
+
+```{python}
+if status == 'Optimal' or status == 'Feasible':
+    print("Total Time:", total_time)  # Print total_time directly!!!
+else:
+    print("Solver did not find an optimal or feasible solution.")
+    # ... (debugging for other statuses)
+```
+
+```{python}
+if status == 'Optimal' or status == 'Feasible':
+    # Check if the optimization status is 'Optimal' or 'Feasible', indicating a valid solution.
+    print("Total Time:", total_time)
+
+    # Create lists to store data for CSV files (edges and nodes).
+    edges_data = []
+    nodes_data = []
+
+    # Iterate through each disposal site and its associated truck variables.
+    for disposal_site, trucks in truck_vars.items():
+
+        # Get the node ID of the disposal site from the dms_dict.
+        disposal_site_node = str(dms_dict[disposal_site][2])
+
+        # Iterate through each fire station.
+        for fire_station in fire_station_dict.keys():
+
+            # Get the node ID of the fire station from the fire_station_dict.
+            fire_station_node = str(fire_station_dict[fire_station][2])
+            
+            # Assign the number of trucks from the trucks variable.
+            num_trucks = trucks
+
+            # Find the quickest path between the disposal site and fire station using the find_quickest_path function.
+            shortest_time, edges_traveled, nodes_traveled = find_quickest_path(graph, disposal_site_node, fire_station_node, truck_capacity, num_trucks)
+
+            # Accumulate the total travel time.
+            total_time += shortest_time
+
+             # Iterate through the edges traveled by the trucks.
+            for u, v, capacity, truck_id in edges_traveled:
+                try:
+                    # Convert node IDs to integers for DataFrame lookup.
+                    u_int = int(u)
+                    v_int = int(v)
+
+                    # Retrieve edge information from the focus_area_edges_df based on node IDs.
+                    edge_info = focus_area_edges_df[(focus_area_edges_df['u'] == u_int) & (focus_area_edges_df['v'] == v_int)].iloc[0]
+
+                    # Append edge data to the edges_data list.
+                    edges_data.append({
+                        "truck_id": f"{disposal_site}-{fire_station}-{truck_id}", #Use truck id here, concatenate disposal site, fire station and truck id
+                        "u": u,
+                        "v": v,
+                        "name": edge_info['name'],
+                        "length": edge_info['length'],
+                        "geometry": edge_info['WKT'],
+                        "truck_capacity": capacity  # Correct capacity for this truck
+                    })
+
+                except (IndexError, KeyError):
+                    # Handle cases where edge information is not found in the DataFrame.
+                    print(f"Edge {u}-{v} information not found in focus_area_edges_df")
+
+            # Iterate through the nodes traveled by the trucks.
+            for node, capacity, truck_id in nodes_traveled:
+                try:
+                    node_info = focus_area_nodes_df[focus_area_nodes_df['osmid'] == int(node)].iloc[0]
+
+
+                    nodes_data.append({
+                        "truck_id": f"{disposal_site}-{fire_station}-{truck_id}", #Use truck id here
+                        "osmid": node,
+                        "y": node_info['y'],
+                        "x": node_info['x'],
+                        "truck_capacity": capacity  # Correct capacity for this truck
+                    })
+
+                except (IndexError, KeyError):
+                    print(f"Node {node} information not found in focus_area_nodes_df")
+        
+    # Create DataFrames and save to CSV
+    edges_df = pd.DataFrame(edges_data)
+    nodes_df = pd.DataFrame(nodes_data)
+
+    edges_df.to_csv("truck_routes_edges.csv", index=False)
+    nodes_df.to_csv("truck_routes_nodes.csv", index=False)
+    print("Truck route data saved to truck_routes_edges.csv and truck_routes_nodes.csv")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+def find_quickest_path(graph, start_node, end_node, truck_capacity, truck_speed=25, clearance_speed=10):
+    try:
+        path = nx.shortest_path(graph, source=str(start_node), target=str(end_node), weight='length')
+    except nx.NetworkXNoPath:
+        print(f"No path found between {start_node} and {end_node}. Skipping.")
+        return float('inf'), [], [], {}  # Return infinity if no path, along with empty lists for edges, nodes, and an empty dictionary for node capacities
+
+    travel_time = 0
+    truck_routes = {truck: {"edges": [], "nodes": [start_node], "capacity": 0} for truck in range(num_trucks)}
+
+    truck_order = list(range(num_trucks))  # Keep track of truck order
+    current_truck_index = 0  # Keep track of which truck is currently being used
+    time = 0  # Initialize time
+    for u, v in zip(path[:-1], path[1:]):
+        edge_data = graph[u][v]
+        if not edge_data:
+            continue
+        edge_travel_time = graph[u][v]['length'] / truck_speed #Calculate edge travel time
+        travel_time += edge_data['length'] / truck_speed
+        debris_on_edge = math.ceil(edge_data['debris'])
+        
+        while debris_on_edge > 0:
+            current_truck = truck_order[current_truck_index]  # Get the current truck
+            collectable = min(debris_on_edge, truck_capacity - truck_routes[current_truck]["capacity"], 10)  # Max 10 CYD per time unit
+            
+            if collectable > 0:
+                clearance_time = collectable / clearance_speed
+               
+                truck_routes[current_truck]["capacity"] += collectable
+                debris_on_edge -= collectable
+                travel_time += collectable / clearance_speed
+                
+                truck_routes[current_truck]["edges"].append((u, v, truck_routes[current_truck]["capacity"], current_truck, time + min(edge_travel_time, clearance_time)))
+                truck_routes[current_truck]["nodes"].append(v, time + min(edge_travel_time, clearance_time))
+                
+                time += min(edge_travel_time, clearance_time)
+                
+                if truck_routes[current_truck]["capacity"] == truck_capacity:
+                    try:
+                        return_path = nx.shortest_path(graph, v, start_node, weight='length')
+                        travel_time += nx.shortest_path_length(graph, v, start_node, weight='length') / truck_speed
+
+                        truck_routes[current_truck]["edges"].extend([(return_path[i], return_path[i+1], 
+                        
+                        truck_routes[current_truck]["capacity"], current_truck, time + min(edge_travel_time, clearance_time)) for i in range(len(return_path)-1)])
+                        
+                        
+                        truck_routes[current_truck]["nodes"].extend(return_path[1:], time + min(edge_travel_time, clearance_time))
+
+                        time += min(edge_travel_time, clearance_time) #Increment time
+
+                
+                    except nx.NetworkXNoPath:
+                        print(f"No return path found from {v} to {start_node}. Skipping return trip.")
+                    
+                    truck_routes[current_truck]["capacity"] = 0  # Reset truck capacity
+                    truck_order.append(truck_order.pop(current_truck_index))
+                    current_truck_index = 0  # Reset to the front of the queue
+                    continue  # Continue to the next edge
+            
+            if debris_on_edge < 10 and debris_on_edge > 0:  # Handle leftover debris
+                collectable = debris_on_edge
+                truck_routes[current_truck]["capacity"] += collectable
+                debris_on_edge = 0
+                travel_time += collectable * (clearance_speed / 10)
+
+                truck_routes[current_truck]["edges"].append((u, v, truck_routes[current_truck]["capacity"], current_truck, time + min(edge_travel_time, clearance_time)))
+                truck_routes[current_truck]["nodes"].append(v, time + min(edge_travel_time, clearance_time))
+
+                time += min(edge_travel_time, clearance_time) #Increment time
+
+                truck_routes[current_truck]["capacity"] = 0
+                truck_order.append(truck_order.pop(current_truck_index))
+                current_truck_index = 0
+                continue  # Continue to the next edge
+
+            current_truck_index = (current_truck_index + 1) % len(truck_order)  # Move to the next truck in the queue
+        
+        if all(route["capacity"] == truck_capacity for route in truck_routes.values()):  # Check if all trucks are full
+            break
+
+    all_edges = []
+    all_nodes = []
+    for truck_id, route in truck_routes.items():
+        for u, v, capacity, truck in route["edges"]:
+            all_edges.append((u, v, capacity, truck))
+        for node in route["nodes"]:
+            capacity = 0  # Initialize capacity for the node
+            for edge_u, edge_v, edge_capacity, edge_truck_id in all_edges:
+                if edge_truck_id == truck_id and edge_v == node:  # Find the capacity relevant to the truck and node
+                    capacity = edge_capacity
+                    break
+            all_nodes.append((node, capacity, truck_id))  # Add truck_id to nodes data
+
+    return travel_time, all_edges, all_nodes  # Return travel time, edges, and nodes
+```
+
+```{python}
+# Define LP Problem
+problem = LpProblem("Debris Removal Optimization", LpMinimize)
+```
+
+```{python}
+# This code creates a dictionary (truck_vars) that maps disposal sites to the number of trucks assigned to them.
+
+truck_vars = {} # Initialize an empty dictionary
+    # This will store the disposal sites as keys and assigned truck counts as values.
+
+for _, row in truck_assignment_df.iterrows(): # Loop through each row in truck_assignment_df
+    # truck_assignment_df.iterrows() iterates through the DataFrame row by row.
+    # _ (underscore) is used to ignore the row index
+    # row represents a single row of data.
+
+    disposal_site = row["Disposal Site"].lower().replace(" ", "_")
+    
+        # Gets the disposal site name from the row.
+        # .lower() ensures case insensitivity (e.g., "Site A" and "site a" are treated the same).
+    print(disposal_site)
+    if disposal_site in dms_dict: # Check if the disposal site exists in dms_dict
+        # dms_dict is a dictionary of disposal management sites.
+        # This ensures only valid disposal sites are included in truck_vars
+
+        truck_vars[disposal_site] = row["Assigned Trucks"]
+            # Store the number of assigned trucks
+            # Adds an entry to the dictionary
+            # The key is the disposal site name (lowercased) and The value is the number of assigned trucks
+
+print(truck_vars)
+```
+
+```{python}
+total_time = 0
+
+# __NEW ADDITION__
+all_routes_data = []
+# __NEW ADDITION__
+
+
+for disposal_site, trucks in truck_vars.items():
+    disposal_site_node = str(dms_dict[disposal_site][2])
+
+    for fire_station in fire_station_dict.keys():
+        fire_station_node = str(fire_station_dict[fire_station][2])
+        num_trucks = trucks # Define num_trucks here, inside the loop
+        
+        # __NEW ADDITION__
+        shortest_time, edges_traveled, nodes_traveled = find_quickest_path(graph, disposal_site_node, fire_station_node, truck_capacity, num_trucks)
+        # __NEW ADDITION__
+
+        total_time += shortest_time
+        print(f"Time from {disposal_site} to {fire_station}: {shortest_time}") # Print individual times
+        print(f"Current Total Time: {total_time}") # Print current total time
+
+        # __NEW ADDITION__
+        for truck_id in range(num_trucks):
+            truck_route_data = {
+                "truck_id": f"{disposal_site}-{fire_station}-{truck_id}",
+                "disposal_site": disposal_site,
+                "fire_station": fire_station,
+                "edges": edges_traveled,
+                "nodes": nodes_traveled
+            }
+            all_routes_data.append(truck_route_data)
+        # __NEW ADDITION__
+        
+```
+
+```{python}
+# Define Constraints
+# solve
+problem += total_time, "Total Time to Clear Critical Nodes"
+```
+
+```{python}
+# Solve Optimization Problem
+problem.writeLP("Debris_Removal_Optimization.lp")
+
+problem.solve()
+status = LpStatus[problem.status]
+print("Status:", status)
+
+```
+
+```{python}
+if status == 'Optimal' or status == 'Feasible':
+    print("Total Time:", total_time)  # Print total_time directly!!!
+else:
+    print("Solver did not find an optimal or feasible solution.")
+    # ... (debugging for other statuses)
+```
+
+```{python}
+# __NEW ADDITION__
+
+if status == 'Optimal' or status == 'Feasible':
+    print("Total Time:", total_time)
+
+    # Create lists to store data for CSV
+    edges_data = []
+    nodes_data = []
+
+    for disposal_site, trucks in truck_vars.items():
+        disposal_site_node = str(dms_dict[disposal_site][2])
+
+        for fire_station in fire_station_dict.keys():
+            fire_station_node = str(fire_station_dict[fire_station][2])
+            num_trucks = trucks
+
+            shortest_time, edges_traveled, nodes_traveled = find_quickest_path(graph, disposal_site_node, fire_station_node, truck_capacity, num_trucks)
+
+            total_time += shortest_time
+            # ... (print statements)
+
+            for u, v, capacity, truck_id in edges_traveled:
+                try:
+                    u_int = int(u)
+                    v_int = int(v)
+                    edge_info = focus_area_edges_df[(focus_area_edges_df['u'] == u_int) & (focus_area_edges_df['v'] == v_int)].iloc[0]
+
+                    edges_data.append({
+                        "truck_id": f"{disposal_site}-{fire_station}-{truck_id}",
+                        "u": u,
+                        "v": v,
+                        "name": edge_info['name'],
+                        "length": edge_info['length'],
+                        "geometry": edge_info['WKT'],
+                        "truck_capacity": capacity,  # Correct capacity for this truck
+                        "travel_time": shortest_time
+                    })
+
+                except (IndexError, KeyError):
+                    print(f"Edge {u}-{v} information not found in focus_area_edges_df")
+
+            for node, capacity, truck_id in nodes_traveled:
+                try:
+                    node_info = focus_area_nodes_df[focus_area_nodes_df['osmid'] == int(node)].iloc[0]
+
+                    nodes_data.append({
+                        "truck_id": f"{disposal_site}-{fire_station}-{truck_id}",
+                        "osmid": node,
+                        "y": node_info['y'],
+                        "x": node_info['x'],
+                        "truck_capacity": capacity  # Correct capacity for this truck
+                    })
+
+                except (IndexError, KeyError):
+                    print(f"Node {node} information not found in focus_area_nodes_df")
+        
+    # Create DataFrames and save to CSV
+    edges_df = pd.DataFrame(edges_data)
+    nodes_df = pd.DataFrame(nodes_data)
+
+    edges_df.to_csv("truck_routes_edges.csv", index=False)
+    nodes_df.to_csv("truck_routes_nodes.csv", index=False)
+    print("Truck route data saved to truck_routes_edges.csv and truck_routes_nodes.csv")
+```
+
