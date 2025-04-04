@@ -37,19 +37,17 @@ execute:
 
 # Import Libraries
 
+Notes:
+- os.chdir(): changes the current working directory to a specific path
+- os.getcwd(): gets current working directory
+
 ```{python}
 import pulp
 import pandas as pd
 import geopandas as gpd
 from shapely import wkt
 from shapely.geometry import Point, LineString
-```
 
-Notes:
-- os.chdir(): changes the current working directory to a specific path
-- os.getcwd(): gets current working directory
-
-```{python}
 # Check the current working directory
 print("Current Working Directory:", os.getcwd())
 
@@ -61,35 +59,37 @@ os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
 
 ```{python}
 # Load Thompson's daily debris activity report of Crowder Gulf
-daily_path = r'input\Lee_Country_Daily_Report.xlsx'
+daily_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\Lee_Country_Daily_Report.xlsx'
 
 # Load debris load locations
-load_path = r'input\Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv'
+load_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv'
 
 # Load debris pile data
-debris_path = r'input\piles_30oct2023a.csv'
+debris_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\piles_30oct2023a.csv'
 
 # Load DMS locations
-DMS_path = r'input\DMS.csv'
+DMS_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\DMS.csv'
 DMS_df = pd.read_csv(DMS_path)
 
 # Load fire station, fueling site, and hospital locations
-fire_station_path = r'input\fire_station.csv'
+fire_station_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\fire_station.csv'
 fire_stations_df = pd.read_csv(fire_station_path)
 
 # Load filtered nodes and edges files
-nodes_path = r'input\Network_edges_filtered.csv' 
-edges_path = r'input\Network_nodes_filtered.csv'
+nodes_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\Network_edges_filtered.csv' 
+edges_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\Network_nodes_filtered.csv'
 nodes_df = pd.read_csv(nodes_path)
 edges_df = pd.read_csv(edges_path)
 
+
+
 # Load filtered (critical) nodes, edges, and debris piles of focus area
-focus_area_nodes_path = r'input\focus area\focus_area_nodes.csv' 
-focus_area_edges_path = r'input\focus area\focus_area_edges.csv'
-focus_area_debris_path = r'input\focus area\focus_area_piles.csv'
-focus_area_fire_station_path = r'input\focus area\focus_area_fire_station.csv'
-focus_area_dms_path = r'input\focus area\focus_area_dms.csv'
-focus_area_loads_path = r'input\focus area\focus_area_loads.csv'
+focus_area_nodes_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_nodes.csv' 
+focus_area_edges_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_edges.csv'
+focus_area_debris_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_piles.csv'
+focus_area_fire_station_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_fire_station.csv'
+focus_area_dms_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_dms.csv'
+focus_area_loads_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_loads.csv'
 
 focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
 focus_area_edges_df = pd.read_csv(focus_area_edges_path)
@@ -99,6 +99,7 @@ focus_area_dms_df = pd.read_csv(focus_area_dms_path)
 focus_area_loads_df = pd.read_csv(focus_area_loads_path)
 ```
 
+If necessary, check coordinate reference system
 ```python
 # Check crs
 print("Node CRS:", focus_area_nodes_gdf.crs)
@@ -106,9 +107,7 @@ print("Node CRS:", focus_area_nodes_gdf.crs)
 
 {{< pagebreak >}}
 
-# Assigning Values
-
-## Focus Area
+# Focus Area
 
 ```{python}
 # Convert nodes to GeoDataFrames using the WKT column
@@ -118,8 +117,6 @@ focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry'
 # Convert edges to GeoDataFrames using the WKT column
 focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads)
 focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326")
-
-
 
 
 # Convert fire station data to GeoDataFrames
