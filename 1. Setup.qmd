@@ -59,37 +59,37 @@ os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
 
 ```{python}
 # Load Thompson's daily debris activity report of Crowder Gulf
-daily_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\Lee_Country_Daily_Report.xlsx'
+daily_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\Lee_Country_Daily_Report.xlsx'
 
 # Load debris load locations
-load_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv'
+load_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv'
 
 # Load debris pile data
-debris_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\piles_30oct2023a.csv'
+debris_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\piles_30oct2023a.csv'
 
 # Load DMS locations
-DMS_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\DMS.csv'
+DMS_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\DMS.csv'
 DMS_df = pd.read_csv(DMS_path)
 
 # Load fire station, fueling site, and hospital locations
-fire_station_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\fire_station.csv'
+fire_station_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\fire_station.csv'
 fire_stations_df = pd.read_csv(fire_station_path)
 
 # Load filtered nodes and edges files
-nodes_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\Network_edges_filtered.csv' 
-edges_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\Network_nodes_filtered.csv'
+nodes_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\Network_edges_filtered.csv' 
+edges_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\Network_nodes_filtered.csv'
 nodes_df = pd.read_csv(nodes_path)
 edges_df = pd.read_csv(edges_path)
 
 
 
 # Load filtered (critical) nodes, edges, and debris piles of focus area
-focus_area_nodes_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_nodes.csv' 
-focus_area_edges_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_edges.csv'
-focus_area_debris_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_piles.csv'
-focus_area_fire_station_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_fire_station.csv'
-focus_area_dms_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_dms.csv'
-focus_area_loads_path = r'C:\Users\leanh\Documents\Storm Debris Removal Inputs\focus area\focus_area_loads.csv'
+focus_area_nodes_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_nodes.csv' 
+focus_area_edges_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_edges.csv'
+focus_area_debris_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_piles.csv'
+focus_area_fire_station_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_fire_station.csv'
+focus_area_dms_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_dms.csv'
+focus_area_loads_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_loads.csv'
 
 focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
 focus_area_edges_df = pd.read_csv(focus_area_edges_path)
@@ -107,31 +107,73 @@ print("Node CRS:", focus_area_nodes_gdf.crs)
 
 {{< pagebreak >}}
 
-# Focus Area
+# Focus Area: Convert Data to GeoDataFrames
 
+Transform pandas dataframe into a GeoDataFrame
 ```{python}
 # Convert nodes to GeoDataFrames using the WKT column
-focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads)
-focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326")
 
+focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads) # [a1] This line creates a new 'geometry' column in the focus_area_nodes_df DataFrame, where each row's geometry is derived from the 'WKT' (Well-Known Text) column.
+
+focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326") # [a2] converts the pandas DataFrame focus_area_nodes_df into a GeoDataFrame (focus_area_nodes_gdf).
+```
+
+[a1]
+- .apply(wkt.loads): Applies the wkt.loads function from the shapely.wkt module to each element (WKT string) in the 'WKT' column.
+- wkt.loads: parses a WKT string and converts it into a Shapely geometry object (e.g., a Point, LineString, or Polygon)
+[a2]
+- gpd.GeoDataFrame(...): Creates a new GeoDataFrame object using the GeoDataFrame constructor
+- geometry='geometry': Specifies that the 'geometry' column in the DataFrame contains the geometric data.
+- crs="EPSG:4326": Sets the Coordinate Reference System (CRS) of the GeoDataFrame to EPSG:4326
+
+```{python}
 # Convert edges to GeoDataFrames using the WKT column
-focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads)
-focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326")
+focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads) # [b1]
+focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326") # [b2]
+```
+
+[b1] & [b2]
+- Same as before but for edges
+
+```{python}
+# Convert fire station data to GeoDataFrames using the WKT column
+focus_area_fire_station_df['geometry'] = focus_area_fire_station_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [c1]
+
+focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geometry='geometry', crs="EPSG:4326") # [c2]
+
+# print(focus_area_fire_station_gdf.head()) # Prints the first few rows (by default, 5) of the newly created GeoDataFrame to check for errors
+```
+
+[c1]
+- .apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1): Applies a function to each row of the DataFrame (axis=1)
+- lambda row: Point(row['Longitude'], row['Latitude']): An anonymous (lambda) function that takes a row of the DataFrame as input. 
+    - For each row, it accesses the 'Longitude' and 'Latitude' values and creates a Point object from the shapely.geometry module. Order is (longitude, latitude)
+[c2]
+- Same as before but for fire stations
+
+```{python}
+# Find nearest nodes to fire stations
+foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [d1] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each fire station in focus_area_fire_station_gdf
+
+# print(foucs_area_fire_station_to_node.head()) # Prints the first few rows of the foucs_area_fire_station_to_node DataFrame to check for errors
+```
+
+[d1]
+- gpd.sjoin_nearest(): Core function for performing a nearest neighbor spatial join.
+- focus_area_fire_station_gdf: Contains the fire stations and acts as the "left" DataFrame in the join
+- focus_area_nodes_gdf: Contains the network nodes and acts as the "right" DataFrame in the join.
+- how="left": Specifies the type of join. 
+    - A "left" join ensures that all rows from the focus_area_fire_station_gdf are kept in the resulting foucs_area_fire_station_to_node DataFrame. 
+    - If a nearest node is found, its attributes are added; otherwise, the added columns will have NaN values.
 
 
-# Convert fire station data to GeoDataFrames
-focus_area_fire_station_df['geometry'] = focus_area_fire_station_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1)
 
-focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geometry='geometry', crs="EPSG:4326")
+```{python}
 
-print(focus_area_fire_station_gdf.head())
 
-# Find nearest nodes for fire stations
-foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
 
-print(foucs_area_fire_station_to_node.head())
 
-# Rename columns for excek
+# Rename columns for excel
 foucs_area_fire_station_to_node = foucs_area_fire_station_to_node.rename(columns={
     'y': 'node_latitude', 
     'x': 'node_longitude'
