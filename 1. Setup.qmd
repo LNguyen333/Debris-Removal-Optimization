@@ -58,45 +58,60 @@ os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
 # Import Data
 
 ```{python}
-# Load Thompson's daily debris activity report of Crowder Gulf
-daily_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\Lee_Country_Daily_Report.xlsx'
+# Get the directory where current Python script is located. This makes paths relative to the project's root
+script_directory = os.path.dirname(__file__)
+
+# Construct the path to 'input' folder relative to the script. Assumes 'input' folder is in the same (sub-)directory as script
+Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
+OSM_path = os.path.join(script_directory, 'input', 'OSM')
+QGIS_path = os.path.join(script_directory, 'input', 'QGIS')
+focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area 2') # Change file here for different focus area
+```
+
+## Lee County
+
+```{python}
+# Load Thompson's daily debris activity report of Crowder Gulf during Hurricane Ian
+daily_path = os.path.join(Lee_County_path, 'Lee_Country_Daily_Report.xlsx')
 
 # Load debris load locations
-load_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv'
+# load_path = (Lee_County_path, 'Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv')
 
-# Load debris pile data
-debris_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\piles_30oct2023a.csv'
+# Load debris pile data for entire Lee County
+debris_path = os.path.join(Lee_County_path, 'piles_30oct2023a.csv')
 
-# Load DMS locations
-DMS_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\DMS.csv'
-DMS_df = pd.read_csv(DMS_path)
+# Load DMS locations from Lee County's Hurricane Support Map
+DMS_path = os.path.join(Lee_County_path, 'DMS.csv')
 
-# Load fire station, fueling site, and hospital locations
-fire_station_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\fire_station.csv'
-fire_stations_df = pd.read_csv(fire_station_path)
+# Load fire station locations from Lee County's Hurricane Support Map
+fire_station_path = os.path.join(Lee_County_path, 'fire_station.csv')
+```
 
+## QGIS
+
+```{python}
 # Load filtered nodes and edges files
-nodes_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\Network_edges_filtered.csv' 
-edges_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\Network_nodes_filtered.csv'
+nodes_path = os.path.join(QGIS_path, 'Network_nodes_filtered.csv')
+edges_path = os.path.join(QGIS_path, 'Network_edges_filtered.csv')
 nodes_df = pd.read_csv(nodes_path)
 edges_df = pd.read_csv(edges_path)
 
-
-
-# Load filtered (critical) nodes, edges, and debris piles of focus area
-focus_area_nodes_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_nodes.csv' 
-focus_area_edges_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_edges.csv'
-focus_area_debris_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_piles.csv'
-focus_area_fire_station_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_fire_station.csv'
-focus_area_dms_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_dms.csv'
-focus_area_loads_path = r'C:\Users\leanh\Documents\Storm Debris Removal\input\focus area\focus_area_loads.csv'
+# Load filtered (critical) nodes, edges, and debris piles of chosen focus area
+focus_area_nodes_path = os.path.join(focus_area_path, 'focus_area_nodes.csv')
+focus_area_edges_path = os.path.join(focus_area_path, 'focus_area_edges.csv')
+focus_area_piles_path = os.path.join(focus_area_path, 'focus_area_piles.csv')
+focus_area_fire_station_path = os.path.join(focus_area_path, 'focus_area_fire_station.csv')
+focus_area_dms_path = os.path.join(focus_area_path, 'focus_area_dms.csv')
+focus_area_hospital_path = os.path.join(focus_area_path, 'focus_area_hospital.csv')
+focus_area_fuel_site_path = os.path.join(focus_area_path, 'focus_area_fuel_site.csv')
 
 focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
 focus_area_edges_df = pd.read_csv(focus_area_edges_path)
-focus_area_debris_df = pd.read_csv(focus_area_debris_path)
+focus_area_piles_df = pd.read_csv(focus_area_piles_path)
 focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
 focus_area_dms_df = pd.read_csv(focus_area_dms_path)
-focus_area_loads_df = pd.read_csv(focus_area_loads_path)
+focus_area_hospital_path = pd.read_csv(focus_area_hospital_path)
+focus_area_fuel_site_path = pd.read_csv(focus_area_fuel_site_path)
 ```
 
 If necessary, check coordinate reference system
@@ -235,7 +250,7 @@ focus_area_dms_to_node.to_csv(r'C:\Users\leanh\Documents\Storm Debris Removal\ou
 
 {{< pagebreak >}}
 
-# Focus Area: Assign Debris
+# Focus Area: Convert and Assign Debris Data
 
 ```{python}
 target_date = "10/19/2022"  # Define your target date as a string
@@ -260,47 +275,41 @@ focus_area_loads_df = focus_area_loads_df[focus_area_loads_df['Load Date'].dt.st
     - This comparison results in a boolean Series (True for rows where the dates match, False otherwise).
 
 ```{python}
-
-```
-
-```{python}
-target_date = "10/19/2022"  # Define your target date as a string
-
-# Convert 'Load Date' column to datetime objects if it's not already
-focus_area_loads_df['Load Date'] = pd.to_datetime(focus_area_loads_df['Load Date']) # [g1]
-
-# Filter the DataFrame for the target date
-focus_area_loads_df = focus_area_loads_df[focus_area_loads_df['Load Date'].dt.strftime('%m/%d/%Y') == target_date] # [g2]
-
-
-
-
-
 # Convert debris data to GeoDataFrames using Load Latitude and Load Longitude columns
-focus_area_loads_df['geometry'] = focus_area_loads_df.apply(
-    lambda row: Point(row['Load Longitude'], row['Load Latitude']),
-    axis=1
-)
+focus_area_loads_df['geometry'] = focus_area_loads_df.apply(lambda row: Point(row['Load Longitude'], row['Load Latitude']), axis=1) # [g3]
+
 focus_area_loads_gdf = gpd.GeoDataFrame(focus_area_loads_df, geometry='geometry', crs="EPSG:4326")
 
-print(focus_area_loads_gdf.head())
+# print(focus_area_loads_gdf.head())
 
 # Find nearest nodes for debris locations
 focus_area_loads_to_node = gpd.sjoin_nearest(focus_area_loads_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
 
-print(focus_area_loads_to_node.head())
-
-# Sum the "CYD" values for each node by grouping by the index of the nodes GeoDataFrames
-cyd_sum_per_node = focus_area_loads_to_node.groupby('index_right')['CYD'].sum()
-
-# Assign this sum as a new column
-focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf.index.map(cyd_sum_per_node).fillna(0)
-
-# Export the updated nodes GeoDataFrame to a CSV file
-focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv("output/focus_area_NodalLoads.csv", index=False)
+# print(focus_area_loads_to_node.head())
 ```
 
-{{< pagebreak >}}
+[g3] 
+- Similar to before except for debris data
+
+```{python}
+# Sum the "CYD" values for each node by grouping by the index of the nodes GeoDataFrames
+cyd_sum_per_node = focus_area_loads_to_node.groupby('index_right')['CYD'].sum() # [g4]
+
+# Assign this sum as a new column
+focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf.index.map(cyd_sum_per_node).fillna(0) # [g5]
+
+# Export the updated nodes GeoDataFrame to a CSV file
+focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv(r'C:\Users\leanh\Documents\Storm Debris Removal\output\1. Setup\focus_area_NodalLoads.csv', index=False)
+```
+
+[g4]
+- cyd_sum_per_node: The result is a pandas Series where the index is the unique values from the 'index_right' column (representing node indices) and the values are the total sum of 'CYD' for each of those nodes.
+- .groupby('index_right'): This groups the rows in focus_area_loads_to_node based on the values in the column named 'index_right'. 
+    - 'index_right' contains the index values from your focus_area_nodes_gdf, effectively linking each debris load to a specific node in your network
+- ['CYD']: After grouping, this selects the 'CYD' column for each group. This column likely contains the amount of debris for each load.
+- .sum(): This calculates the sum of the 'CYD' values for all the rows within each group (i.e., for all debris loads associated with the same node)
+[g5]
+- focus_area_nodes_gdf.index: This accesses the index of the focus_area_nodes_gdf. It's assumed that the index of this GeoDataFrame corresponds to the 'index_right' values used in the groupby() operation.
 
 ## Nodes to Edges Assignment
 
