@@ -1,0 +1,1008 @@
+---
+title: "Variable Neighborhood Search and Variable Neighborhood Descent"
+author: "Leanh Nguyen (Ln14)"
+
+date: 2025-04-04
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+  jupyter: python3
+---
+
+{{< pagebreak >}}
+
+# Setting Up Data
+
+```{python}
+from pulp import *
+import pandas as pd
+import geopandas as gpd
+import networkx as nx
+import matplotlib.pyplot as plt
+import osmnx as ox
+import numpy as np
+import os
+import random
+import copy
+import math
+from shapely import wkt
+import time
+
+# Check the current working directory
+print("Current Working Directory:", os.getcwd())
+
+# Set the working directory to the project root if necessary
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+
+# Get the directory where current Python script is located. This makes paths relative to the project's root
+script_directory = os.path.dirname(__file__)
+
+# Construct the path to 'input' folder relative to the script. Assumes 'input' folder is in the same (sub-)directory as script
+Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
+OSM_path = os.path.join(script_directory, 'input', 'OSM')
+QGIS_path = os.path.join(script_directory, 'input', 'QGIS')
+focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area 2') 
+Setup_path = os.path.join(script_directory, 'output', '1. Setup')
+# Change file here for different focus area
+
+output_base_dir = os.path.join(script_directory, 'output', '2. Variable Neighborhood Search')
+```
+
+## Lee County
+
+```{python}
+# Load Thompson's daily debris activity report of Crowder Gulf during Hurricane Ian
+daily_path = os.path.join(Lee_County_path, 'Lee_Country_Daily_Report.xlsx')
+
+# Load debris pile data for entire Lee County
+debris_path = os.path.join(Lee_County_path, 'piles_30oct2023a.csv')
+
+# Load DMS locations from Lee County's Hurricane Support Map
+DMS_path = os.path.join(Lee_County_path, 'DMS.csv')
+
+# Load fire station locations from Lee County's Hurricane Support Map
+fire_station_path = os.path.join(Lee_County_path, 'fire_station.csv')
+```
+
+## QGIS
+
+```{python}
+# Load filtered nodes and edges files
+nodes_path = os.path.join(QGIS_path, 'Network_nodes_filtered.csv')
+edges_path = os.path.join(QGIS_path, 'Network_edges_filtered.csv')
+nodes_df = pd.read_csv(nodes_path)
+edges_df = pd.read_csv(edges_path)
+
+# Load filtered (critical) nodes, edges, and debris piles of chosen focus area
+focus_area_nodes_path = os.path.join(focus_area_path, 'focus_area_nodes.csv')
+focus_area_edges_path = os.path.join(focus_area_path, 'focus_area_edges.csv')
+focus_area_piles_path = os.path.join(focus_area_path, 'focus_area_piles.csv')
+focus_area_fire_station_path = os.path.join(focus_area_path, 'focus_area_fire_station.csv')
+focus_area_dms_path = os.path.join(focus_area_path, 'focus_area_dms.csv')
+focus_area_hospital_path = os.path.join(focus_area_path, 'focus_area_hospital.csv')
+focus_area_fuel_site_path = os.path.join(focus_area_path, 'focus_area_fuel_site.csv')
+
+focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
+focus_area_edges_df = pd.read_csv(focus_area_edges_path)
+focus_area_piles_df = pd.read_csv(focus_area_piles_path)
+focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
+focus_area_dms_df = pd.read_csv(focus_area_dms_path)
+focus_area_hospital_df = pd.read_csv(focus_area_hospital_path)
+focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
+```
+
+## Output
+
+```{python}
+#
+focus_area_dms_node_with_trucks_path = os.path.join(Setup_path, 'focus_area_dms_node_with_trucks.csv')
+focus_area_EdgeLoads_Combined_path = os.path.join(Setup_path, 'focus_area_EdgeLoads_Combined.csv')
+focus_area_fire_station_node_path = os.path.join(Setup_path, 'focus_area_fire_station_node.csv')
+focus_area_fuel_site_node_path = os.path.join(Setup_path, 'focus_area_fuel_site_node.csv')
+focus_area_hospital_node_path = os.path.join(Setup_path, 'focus_area_hospital_node.csv')
+focus_area_NodalLoads_path = os.path.join(Setup_path, 'focus_area_NodalLoads.csv')
+
+# The dms's node_longitude and node_latitude and number of Trucks assigned
+focus_area_dms_node_with_trucks_nodes_df = pd.read_csv(focus_area_dms_node_with_trucks_path)
+# The edges' (u,v) from OSM and total_split_CYD of debris and distance (meters)
+focus_area_EdgeLoads_Combined_df = pd.read_csv(focus_area_EdgeLoads_Combined_path)
+# The fire stations' node_longitude and node_latitude
+focus_area_fire_station_node_df = pd.read_csv(focus_area_fire_station_node_path)
+# The fuel sites' node_longitude and node_latitude
+focus_area_fuel_site_node_df = pd.read_csv(focus_area_fuel_site_node_path)
+# The hospitals' node_longitude and node_latitude
+focus_area_hospital_node_df = pd.read_csv(focus_area_hospital_node_path) 
+focus_area_NodalLoads_df = pd.read_csv(focus_area_NodalLoads_path) # In case it is needed
+
+file_name = "haul_in_trucks_value.txt"
+full_file_path = os.path.join(Setup_path, file_name)
+with open(full_file_path, 'r') as f:
+    loaded_haul_in_trucks = int(f.read().strip())
+# print(f"Successfully read haul_in_trucks: {loaded_haul_in_trucks}")
+```
+
+# Variable Neighborhood Search (VNS) Implementation for Debris Removal Routing
+
+```{python}
+# Calculate route cost (distance + debris clearing time)
+def calculate_route_cost(route, edge_data, truck_speed=9, clearing_rate=10, update_debris=False, debris_update_range=(0, 100)):
+    """
+    Calculate the total cost (time) of a route, considering travel and debris clearing.
+    Optionally updates debris on neighboring edges when visiting a node.
+
+    Inputs:
+        route (list): List of node IDs representing the route.
+        edge_data (pd.DataFrame): DataFrame with columns ['u', 'v', 'length', 'total_split_CYD'].
+        truck_speed (float): Truck speed in meters per hour.
+        clearing_rate (float): Debris clearing rate in CYD per hour.
+        update_debris (bool): If True, randomly update debris on neighboring edges at each node.
+        debris_update_range (tuple): Range of random debris update (min, max) in CYD.
+
+    Outputs:
+        float: Total route cost (hours).
+    """
+    total_time = 0
+    edge_data = edge_data.copy()
+    for i in range(len(route) - 1):
+        u, v = route[i], route[i + 1]
+        edge = edge_data[((edge_data['u'] == u) & (edge_data['v'] == v)) | ((edge_data['u'] == v) & (edge_data['v'] == u))]
+        if not edge.empty:
+            edge = edge.iloc[0]
+            travel_time = edge['length'] / truck_speed
+            debris_clearing_time = edge['total_split_CYD'] / clearing_rate
+            total_time += travel_time + debris_clearing_time
+
+            # If enabled, update debris on neighboring edges when visiting a node
+            if update_debris and i < len(route) - 2:
+                curr_node = v
+                neighbors = set(edge_data[(edge_data['u'] == curr_node) | (edge_data['v'] == curr_node)].index)
+                for idx in neighbors:
+                    # Add or subtract random debris
+                    change = random.randint(*debris_update_range)
+                    if random.random() < 0.5:
+                        change = -change
+                    edge_data.at[idx, 'total_split_CYD'] = max(0, edge_data.at[idx, 'total_split_CYD'] + change)
+        else:
+            print(f"Warning: Edge between nodes {u} and {v} not found.")
+            return float('inf')
+    return total_time
+```
+
+```{python}
+# 2. Two-opt swap for route improvement
+def two_opt(route, i, j):
+    """
+    Performs a 2-opt swap on the route between indices i and j (inclusive).
+
+    Args:
+        route (list): Current route.
+        i (int): Start index of segment to reverse.
+        j (int): End index of segment to reverse.
+
+    Returns:
+        list: New route after 2-opt swap.
+    """
+    if i > j:
+        i, j = j, i
+    return route[:i] + route[i:j+1][::-1] + route[j+1:]
+```
+
+```{python}
+# 3. Shaking function to perturb the current route
+def shaking(route, shake_strength_k):
+    """
+    Applies k random 2-opt swaps to the route to escape local minima.
+
+    Args:
+        route (list): Current route.
+        shake_strength_k (int): Number of 2-opt swaps.
+
+    Returns:
+        list: Perturbed route.
+    """
+    new_route = list(route)
+    if len(new_route) < 4:
+        return new_route
+    for _ in range(shake_strength_k):
+        idx1, idx2 = random.sample(range(1, len(new_route) - 1), 2)
+        new_route = two_opt(new_route, min(idx1, idx2), max(idx1, idx2))
+    return new_route
+```
+
+```{python}
+# 4. Local search using 2-opt to improve the route
+def local_search(route, edge_data, neighborhood_operator, truck_speed=9, clearing_rate=10):
+    """
+    Improves the route using local search (2-opt) until no improvement is found.
+
+    Args:
+        route (list): Initial route.
+        edge_data (pd.DataFrame): Edge data.
+        neighborhood_operator (function): Function for neighborhood move (e.g., two_opt).
+        truck_speed (float): Truck speed.
+        clearing_rate (float): Debris clearing rate.
+
+    Returns:
+        list: Locally optimized route.
+    """
+    best_route = list(route)
+    best_cost = calculate_route_cost(best_route, edge_data, truck_speed, clearing_rate)
+    improved = True
+    n = len(best_route)
+    while improved:
+        improved = False
+        for i in range(1, n - 2):
+            for j in range(i + 1, n - 1):
+                if j - i == 1:
+                    continue
+                new_route = neighborhood_operator(best_route, i, j)
+                new_cost = calculate_route_cost(new_route, edge_data, truck_speed, clearing_rate)
+                if new_cost < best_cost:
+                    best_route = new_route
+                    best_cost = new_cost
+                    improved = True
+                    break
+            if improved:
+                break
+    return best_route
+```
+
+```{python}
+# 5. Variable Neighborhood Search main function
+def variable_neighborhood_search(initial_route, edge_data, max_shake_strength_k, neighborhood_operator, truck_speed=9, clearing_rate=10):
+    """
+    Runs the VNS algorithm to find the best route.
+
+    Args:
+        initial_route (list): Starting route.
+        edge_data (pd.DataFrame): Edge data.
+        max_shake_strength_k (int): Maximum shake strength.
+        neighborhood_operator (function): Neighborhood move function.
+        truck_speed (float): Truck speed.
+        clearing_rate (float): Debris clearing rate.
+
+    Returns:
+        tuple: (best_route, total_exploration_time, total_exploitation_time)
+    """
+    current_route = list(initial_route)
+    current_shake_strength_k = 1
+    total_exploration_time = 0
+    total_exploitation_time = 0
+
+    while current_shake_strength_k <= max_shake_strength_k:
+        # Shaking (exploration)
+        start_explore = time.time()
+        perturbed_route = shaking(current_route, current_shake_strength_k)
+        total_exploration_time += time.time() - start_explore
+
+        # Local search (exploitation)
+        start_exploit = time.time()
+        improved_route = local_search(perturbed_route, edge_data, neighborhood_operator, truck_speed, clearing_rate)
+        total_exploitation_time += time.time() - start_exploit
+
+        if calculate_route_cost(improved_route, edge_data, truck_speed, clearing_rate) < \
+           calculate_route_cost(current_route, edge_data, truck_speed, clearing_rate):
+            current_route = improved_route
+            current_shake_strength_k = 1
+        else:
+            current_shake_strength_k += 1
+
+    return current_route, total_exploration_time, total_exploitation_time
+```
+
+# ==========================
+# Example: Setting up the initial route and running VNS
+# ==========================
+
+# 1. Determine initial route: DMS to nearest fire station/hospital/fuel site, then all piles, return to DMS
+
+# Helper: Find nearest target node (fire station, hospital, or fuel site) for each DMS
+def find_nearest_target(dms_node, target_nodes, nodes_df):
+    dms_coords = nodes_df[nodes_df['node'] == dms_node][['node_longitude', 'node_latitude']].values[0]
+    min_dist = float('inf')
+    nearest = None
+    for target in target_nodes:
+        target_coords = nodes_df[nodes_df['node'] == target][['node_longitude', 'node_latitude']].values[0]
+        dist = np.linalg.norm(dms_coords - target_coords)
+        if dist < min_dist:
+            min_dist = dist
+            nearest = target
+    return nearest
+
+# Example: Use first DMS and all piles, return to DMS
+dms_node = focus_area_dms_node_with_trucks_nodes_df['node'].iloc[0]
+num_trucks = focus_area_dms_node_with_trucks_nodes_df['Trucks'].iloc[0]
+pile_nodes = focus_area_piles_df['node'].tolist()
+fire_nodes = focus_area_fire_station_node_df['node'].tolist() if not focus_area_fire_station_node_df.empty else []
+hospital_nodes = focus_area_hospital_node_df['node'].tolist() if not focus_area_hospital_node_df.empty else []
+fuel_nodes = focus_area_fuel_site_node_df['node'].tolist() if not focus_area_fuel_site_node_df.empty else []
+target_candidates = fire_nodes + hospital_nodes + fuel_nodes
+
+if target_candidates:
+    target_node = find_nearest_target(dms_node, target_candidates, focus_area_nodes_df)
+else:
+    target_node = dms_node  # fallback
+
+# Initial route: DMS -> target -> all piles -> DMS
+initial_route = [dms_node, target_node] + pile_nodes + [dms_node]
+
+# 2. Run VNS
+best_route, exploration_time, exploitation_time = variable_neighborhood_search(
+    initial_route,
+    focus_area_EdgeLoads_Combined_df,
+    max_shake_strength_k=5,
+    neighborhood_operator=two_opt,
+    truck_speed=9,
+    clearing_rate=10
+)
+
+print("Best route:", best_route)
+print("Exploration time (s):", exploration_time)
+print("Exploitation time (s):", exploitation_time)
+
+# ==========================
+# Truck deployment simulation (methodology lines 325-350)
+# ==========================
+
+# Initialize trucks: {truck_id: {"position": dms_node, "route": [], "load": 0}}
+trucks = {f"{dms_node}.{i+1}": {"position": dms_node, "route": [dms_node], "load": 0, "active": False} for i in range(num_trucks)}
+truck_capacity = 1000  # Example: set truck capacity (CYD), adjust as needed
+
+# Copy edge data for dynamic debris updates
+edge_data_sim = focus_area_EdgeLoads_Combined_df.copy()
+
+# Simulate trucks moving along the best route
+lead_truck_route = list(best_route)
+lead_truck_idx = 0
+deployed_trucks = 1  # Start with lead truck
+
+while lead_truck_idx < len(lead_truck_route) - 1:
+    # Move lead truck to next node
+    curr_node = lead_truck_route[lead_truck_idx]
+    next_node = lead_truck_route[lead_truck_idx + 1]
+
+    # Deploy trailing trucks if lead truck is far enough
+    if deployed_trucks < num_trucks and lead_truck_idx >= deployed_trucks:
+        trucks[f"{dms_node}.{deployed_trucks+1}"]["active"] = True
+        deployed_trucks += 1
+
+    # For each active truck, move it along the route if possible
+    for tid, tinfo in trucks.items():
+        if not tinfo["active"]:
+            continue
+        tpos_idx = tinfo["route"][-1]
+        # Find next node for this truck (if not at end)
+        try:
+            idx_in_route = lead_truck_route.index(tpos_idx)
+            if idx_in_route < len(lead_truck_route) - 1:
+                next_pos = lead_truck_route[idx_in_route + 1]
+                # Update debris on edge
+                edge_mask = (
+                    ((edge_data_sim['u'] == tpos_idx) & (edge_data_sim['v'] == next_pos)) |
+                    ((edge_data_sim['u'] == next_pos) & (edge_data_sim['v'] == tpos_idx))
+                )
+                if edge_mask.any():
+                    edge_idx = edge_data_sim[edge_mask].index[0]
+                    debris = edge_data_sim.at[edge_idx, 'total_split_CYD']
+                    # Clear debris up to truck capacity
+                    clear_amt = min(truck_capacity - tinfo["load"], debris)
+                    tinfo["load"] += clear_amt
+                    edge_data_sim.at[edge_idx, 'total_split_CYD'] = max(0, debris - clear_amt)
+                    # Randomly update debris on neighboring edges
+                    neighbors = set(edge_data_sim[(edge_data_sim['u'] == next_pos) | (edge_data_sim['v'] == next_pos)].index)
+                    for nidx in neighbors:
+                        change = random.randint(0, 100)
+                        if random.random() < 0.5:
+                            change = -change
+                        edge_data_sim.at[nidx, 'total_split_CYD'] = max(0, edge_data_sim.at[nidx, 'total_split_CYD'] + change)
+                    # Move truck to next node
+                    tinfo["route"].append(next_pos)
+                    tinfo["position"] = next_pos
+                    # If truck is full, send back to DMS
+                    if tinfo["load"] >= truck_capacity or next_pos == dms_node:
+                        tinfo["route"].append(dms_node)
+                        tinfo["position"] = dms_node
+                        tinfo["load"] = 0
+                else:
+                    # No edge found, skip
+                    continue
+        except ValueError:
+            continue
+
+    lead_truck_idx += 1
+
+# Print truck routes
+for tid, tinfo in trucks.items():
+    print(f"Truck {tid}: Route: {tinfo['route']}")
+
+# Enhanced truck deployment simulation with time tracking and truck queuing
+
+# Parameters
+truck_capacity = 1000  # CYD
+truck_speed = 9        # meters per hour
+clearing_rate = 10     # CYD per hour
+
+# Initialize trucks: {truck_id: {"position": dms_node, "route": [dms_node], "load": 0, "active": False, "time": 0, "queue": []}}
+trucks = {
+    f"{dms_node}.{i+1}": {
+        "position": dms_node,
+        "route": [dms_node],
+        "load": 0,
+        "active": False,
+        "time": 0,      # time in hours
+        "queue": []     # nodes to visit
+    }
+    for i in range(num_trucks)
+}
+
+# Assign the best route to each truck's queue (excluding the starting DMS node)
+for tinfo in trucks.values():
+    tinfo["queue"] = list(best_route[1:])  # skip the first DMS node, as they're already there
+
+# Activate the lead truck
+trucks[f"{dms_node}.1"]["active"] = True
+
+# Copy edge data for dynamic debris updates
+edge_data_sim = focus_area_EdgeLoads_Combined_df.copy()
+
+# Time tracking
+global_time = 0
+finished_trucks = set()
+step = 0
+
+while len(finished_trucks) < num_trucks:
+    step += 1
+    # Find the next truck to move (the one with the smallest time and has nodes left in its queue)
+    active_trucks = [tid for tid, tinfo in trucks.items() if tinfo["active"] and tinfo["queue"]]
+    if not active_trucks:
+        # Activate next truck in queue if possible
+        for tid, tinfo in trucks.items():
+            if not tinfo["active"] and tinfo["queue"]:
+                tinfo["active"] = True
+                active_trucks.append(tid)
+                break
+        if not active_trucks:
+            break  # All trucks finished
+
+    # Move each active truck one step (to the next node in its queue)
+    for tid in active_trucks:
+        tinfo = trucks[tid]
+        curr_node = tinfo["position"]
+        if not tinfo["queue"]:
+            finished_trucks.add(tid)
+            continue
+        next_node = tinfo["queue"].pop(0)
+
+        # Find edge
+        edge_mask = (
+            ((edge_data_sim['u'] == curr_node) & (edge_data_sim['v'] == next_node)) |
+            ((edge_data_sim['u'] == next_node) & (edge_data_sim['v'] == curr_node))
+        )
+        if edge_mask.any():
+            edge_idx = edge_data_sim[edge_mask].index[0]
+            edge = edge_data_sim.loc[edge_idx]
+            # Travel time
+            travel_time = edge['length'] / truck_speed
+            # Debris clearing time
+            debris = edge_data_sim.at[edge_idx, 'total_split_CYD']
+            clear_amt = min(truck_capacity - tinfo["load"], debris)
+            clearing_time = clear_amt / clearing_rate if clear_amt > 0 else 0
+            # Update truck state
+            tinfo["time"] += travel_time + clearing_time
+            tinfo["load"] += clear_amt
+            edge_data_sim.at[edge_idx, 'total_split_CYD'] = max(0, debris - clear_amt)
+            tinfo["route"].append(next_node)
+            tinfo["position"] = next_node
+
+            # If truck is full or returned to DMS, reset load and send back to DMS if not already there
+            if tinfo["load"] >= truck_capacity or next_node == dms_node:
+                if next_node != dms_node:
+                    tinfo["queue"] = [dms_node] + tinfo["queue"]
+                tinfo["load"] = 0
+
+            # If this is the lead truck, update debris on neighboring edges
+            if tid == f"{dms_node}.1":
+                neighbors = set(edge_data_sim[(edge_data_sim['u'] == next_node) | (edge_data_sim['v'] == next_node)].index)
+                for nidx in neighbors:
+                    change = random.randint(0, 100)
+                    if random.random() < 0.5:
+                        change = -change
+                    edge_data_sim.at[nidx, 'total_split_CYD'] = max(0, edge_data_sim.at[nidx, 'total_split_CYD'] + change)
+        else:
+            # No edge found, skip
+            continue
+
+    # Update global time to the minimum time among all active trucks
+    global_time = min([tinfo["time"] for tinfo in trucks.values() if tinfo["active"]])
+
+# Print truck routes and times
+for tid, tinfo in trucks.items():
+    print(f"Truck {tid}: Route: {tinfo['route']}, Total time: {tinfo['time']:.2f} hours")
+
+# Note: This simulation tracks each truck's time, queue, and route, and updates debris dynamically as the lead truck visits nodes.
+
+# --- VNS code update note ---
+# The VNS code itself does not need to be changed for this simulation, as it operates on a static snapshot of the edge data.
+# However, if you want the VNS to adapt to dynamic debris updates (as in this simulation), you would need to re-run VNS after each major debris update,
+# or design a dynamic VNS that can handle changing edge weights in real time.
+# For most use cases, VNS is run on the initial (estimated) debris, and the simulation is used to test robustness to debris uncertainty.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+
+
+def calculate_route_cost(route, edge_data, truck_speed=9, clearing_rate=10):
+    """
+    Calculates the cost of a route, considering distance, debris, truck speed, and clearing rate.
+
+    Args:
+        route (list): A list of node IDs representing the route.
+        edge_data (gpd.GeoDataFrame): GeoDataFrame containing edge information (u, v, length, total_split_CYD).
+        truck_speed (float): Speed of the truck in meters per hour. Default is 9 m/hr.
+        clearing_rate (float): Rate at which debris is cleared in CYD per hour. Default is 10 CYD/hr.
+
+    Returns:
+        float: The total cost of the route in terms of time (hours).
+    """
+    total_time = 0
+    for i in range(len(route) - 1):
+        u, v = route[i], route[i + 1]
+        
+        # Find the edge in the GeoDataFrame
+        edge = edge_data[((edge_data['u'] == u) & (edge_data['v'] == v)) | ((edge_data['u'] == v) & (edge_data['v'] == u))]
+        
+        if not edge.empty:
+            edge = edge.iloc[0]  # Get the first (and should be only) matching edge
+
+            # Calculate travel time based on distance and truck speed
+            travel_time = edge['length'] / truck_speed
+
+            # Calculate debris clearing time (if any)
+            debris_clearing_time = edge['total_split_CYD'] / clearing_rate
+
+            # Add both times to the total cost
+            total_time += travel_time + debris_clearing_time
+        else:
+            print(f"Warning: Edge between nodes {u} and {v} not found.")
+            return float('inf')  # Indicate an invalid route cost
+
+    return total_time
+```
+```{python}
+"""
+Function TWO_OPT(CurrentRoute, IndexI, IndexJ)
+    FirstSegment ← Take part of CurrentRoute from the beginning up to (but not including) IndexI
+    ReversedMiddleSegment ← Take part of the route from IndexI to IndexJ (inclusive) and reverse it
+    LastSegment ← Take part of route after IndexJ
+    NewRoute ← Combine FirstSegment, ReveresedMiddleSegment, and LastSegment in that order
+    Output NewTour
+"""
+
+def two_opt(current_route, i, j):
+    """
+    Performs a 2-opt swap on a route.
+
+    Args:
+        current_route (list): The current route (list of node IDs).
+        i (int): The starting index of the segment to reverse (inclusive).
+        j (int): The ending index of the segment to reverse (inclusive).
+
+    Returns:
+        list: The new route after the 2-opt swap.
+    """
+    # Ensure i is less than j for slicing
+    if i > j:
+        i, j = j, i
+        
+    # FirstSegment ← Take part of CurrentRoute from the beginning up to (but not including) IndexI
+    first_segment = current_route[:i]
+    
+    # ReversedMiddleSegment ← Take part of the route from IndexI to IndexJ (inclusive) and reverse it
+    middle_segment = current_route[i:j+1]
+    reversed_middle_segment = middle_segment[::-1] # Reverse the segment
+    
+    # LastSegment ← Take part of route after IndexJ
+    last_segment = current_route[j+1:]
+    
+    # NewRoute ← Combine FirstSegment, ReveresedMiddleSegment, and LastSegment in that order
+    new_route = first_segment + reversed_middle_segment + last_segment
+    
+    return new_route
+```
+
+
+```{python}
+"""
+Function SHAKING(CurrentRoute, ShakeStrengthK)
+    Create a NewRoute as a copy of CurrentRoute
+    For each step from 1 to ShakeStrengthK:
+        { 
+        Select 2 random indices (IndexI, IndexJ) from route (excluding endpoints)
+        Arrange them so IndexI is less than IndexJ
+        NewRoute ← TWO_OPT(NewRoute)
+        }
+    Output NewRoute (perturbed)
+
+"""
+
+# It is assumed that the 'two_opt' function is defined in the same scope,
+# for example:
+# def two_opt(current_route, i, j):
+#     # ... implementation ...
+#     return new_route
+
+def shaking(current_route, shake_strength_k):
+    """
+    Performs shaking on a route by applying a specified number of 2-opt moves.
+    The 2-opt moves are applied by selecting two random, distinct indices
+    from the route, excluding its endpoints.
+
+    Args:
+        current_route (list): The current route, represented as a list of node IDs.
+        shake_strength_k (int): The number of 2-opt swaps to apply (the "shake strength").
+                                Corresponds to ShakeStrengthK in the pseudocode.
+
+    Returns:
+        list: The new, perturbed route after shaking.
+    """
+    new_route = list(current_route)  # Create a copy of CurrentRoute
+
+    # The route must have at least 4 nodes to select two distinct indices
+    # excluding the endpoints.
+    # (Indices 0, ..., L-1. Non-endpoints are 1, ..., L-2. Need L-2 >= 2 => L >= 4)
+    if len(new_route) < 4:
+        # If the route is too short, the described shaking operation
+        # (picking two distinct indices excluding endpoints) is not possible.
+        return new_route
+
+    for _ in range(shake_strength_k):
+        # Select 2 random distinct indices (IndexI, IndexJ) from route (excluding endpoints).
+        # Endpoints are at index 0 and len(new_route)-1.
+        # Valid internal indices for selection are from 1 to len(new_route)-2.
+        # In Python's range, this is range(1, len(new_route)-1).
+        
+        # random.sample ensures distinct indices are chosen.
+        # The check len(new_route) < 4 ensures that len(range(1, len(new_route)-1)) >= 2.
+        idx1, idx2 = random.sample(range(1, len(new_route) - 1), 2)
+        
+        # Arrange them so IndexI is less than IndexJ, as per pseudocode.
+        # Note: The provided two_opt function handles i > j internally,
+        # but adhering to the pseudocode step explicitly.
+        index_i = min(idx1, idx2)
+        index_j = max(idx1, idx2)
+        
+        # NewRoute ← TWO_OPT(NewRoute, IndexI, IndexJ)
+        # This assumes 'two_opt' is an available function that takes the route
+        # and the two indices.
+        new_route = two_opt(new_route, index_i, index_j)
+        
+    return new_route
+```
+
+
+```{python}
+"""
+Function LOCAL_SEARCH(CurrentRoute, DistanceMatrix, NeighborhoodOperator)
+    BetterSolutionFound ← TRUE
+    OriginalDistance ← CALCULATE_ROUTE_DISTANCE
+    While BetterSolutionFound is TRUE:
+        { 
+        BetterSoultionFound ← FALSE
+        For each IndexI from 1 to length of CurrentRoute – 2:
+            [
+            For each IndexJ from IndexI + 1 to length of CurrentRoute – 1
+                (
+                If IndexJ – IndexI is equal to 1:
+                    {
+                    Continue to next pair
+                    }
+                NewRoute ← NeighborhoodOperator(CurrentRoute, IndexI, IndexJ)
+                NewDistance ← CALCULATE_ROUTE_DISTANCE(NewRoute)
+                If NewDistance is less than OriginalDistance:
+                    {
+                    Update CurrentRoute to NewRoute
+                    Update OriginalDistance to NewDistance
+                    BetterSolutionFound ← TRUE
+                    }
+                )
+            ]
+        }
+    Output CurrentRoute
+
+"""
+
+# It is assumed that the 'calculate_route_cost' and 'two_opt' functions
+# are defined in the same scope.
+
+# def calculate_route_cost(route, edge_data, truck_speed=9, clearing_rate=10):
+#     # ... implementation ...
+#     return total_time
+
+# def two_opt(current_route, i, j):
+#     # ... implementation ...
+#     return new_route
+
+def local_search(current_route, edge_data, neighborhood_operator, truck_speed=9, clearing_rate=10):
+    """
+    Performs a local search to improve a route using a given neighborhood operator.
+
+    Args:
+        current_route (list): The initial route (list of node IDs).
+        edge_data (gpd.GeoDataFrame): GeoDataFrame with edge information.
+                                      Used by calculate_route_cost.
+        neighborhood_operator (function): A function that takes a route and two indices,
+                                          and returns a new route (e.g., two_opt).
+        truck_speed (float): Speed of the truck in meters per hour.
+        clearing_rate (float): Rate at which debris is cleared in CYD per hour.
+
+    Returns:
+        list: The improved route after local search.
+    """
+    best_route = list(current_route) # Work with a copy
+    better_solution_found = True
+    # Calculate initial cost using the provided edge_data
+    current_best_cost = calculate_route_cost(best_route, edge_data, truck_speed, clearing_rate)
+
+    while better_solution_found:
+        better_solution_found = False
+        # Iterate through all possible pairs of indices (i, j) for the neighborhood operator
+        # Pseudocode: IndexI from 1 to length of CurrentRoute – 2
+        # Pseudocode: IndexJ from IndexI + 1 to length of CurrentRoute – 1
+        # Python range: range(start, stop) where stop is exclusive.
+        # Route length must be at least 3 for i to be valid (1 to len-2)
+        # and at least 4 for j to be valid (i+1 to len-1) and j-i != 1
+        
+        # Loop for IndexI (from 0 to len-3 for 2-opt, as it operates on edges)
+        # The pseudocode indices seem to be 1-based and refer to nodes.
+        # If CurrentRoute has N nodes, it has N-1 edges.
+        # 2-opt typically swaps two non-adjacent edges.
+        # An edge is (node_k, node_{k+1}).
+        # IndexI in pseudocode seems to be the *end* of the first segment.
+        # So, if IndexI is 1, first segment is route[0].
+        # If CurrentRoute = [N0, N1, N2, N3, N4]
+        # IndexI from 1 to 3 (len-2)
+        # IndexJ from IndexI+1 to 4 (len-1)
+
+        # Let's adjust to Python 0-based indexing carefully.
+        # If route is [A, B, C, D, E], len = 5
+        # i from 0 to len(route) - 2 (exclusive for end of range)
+        # j from i + 1 to len(route) -1 (exclusive for end of range)
+        # This ensures i and j are valid indices for slicing.
+        # The two_opt function expects indices i and j for the segment to be reversed.
+        # current_route[:i]
+        # current_route[i:j+1]
+        # current_route[j+1:]
+        # So, i can be 0. j must be > i.
+        # For 2-opt, we are choosing two edges to break.
+        # Edge 1: (route[i-1], route[i])
+        # Edge 2: (route[j], route[j+1])
+        # The segment to reverse is route[i...j]
+        # Pseudocode: IndexI from 1 to length-2. This means `i` in `two_opt` can range from 1 to length-2.
+        # Pseudocode: IndexJ from IndexI+1 to length-1. This means `j` in `two_opt` can range from `i+1` to length-1.
+
+        n = len(best_route)
+        if n < 4: # Need at least 4 nodes for a valid 2-opt that changes something and satisfies j-i != 1
+            # For n=3, e.g. [N0, N1, N2]:
+            # i_param loop range(1, 2) -> i_param = 1
+            # j_param loop range(1+1, 3) -> j_param = 2
+            # j_param - i_param = 2 - 1 = 1. This pair is skipped.
+            # So, for n=3, no operation is performed.
+            # For n=2 or n=1, loops won't run.
+            break # Cannot perform meaningful 2-opt as per loop conditions and skip
+
+        # Pseudocode: IndexI from 1 to length of CurrentRoute – 2
+        # In Python, this is range(1, n - 1)
+        # These are the `i` and `j` parameters for the `two_opt` function,
+        # which are 0-based indices for the start and end of the segment to reverse.
+        for i_param in range(1, n - 1): # i_param is the start index of the segment to reverse
+            # Pseudocode: IndexJ from IndexI + 1 to length of CurrentRoute – 1
+            # In Python, this is range(i_param + 1, n)
+            # j_param is the end index of the segment to reverse
+            for j_param in range(i_param + 1, n):
+                # Condition: If IndexJ – IndexI is equal to 1: Continue
+                # This means the segment to reverse has length 2 (e.g., route[i_param:j_param+1]).
+                # Example: i_param=1, j_param=2. Segment is route[1:3] = (route[1], route[2]).
+                # Reversing it gives (route[2], route[1]).
+                # The pseudocode explicitly says to skip this.
+                if (j_param - i_param) == 1:
+                    continue
+
+                # Ensure j_param is a valid end index for a segment starting at i_param.
+                # The two_opt function expects i <= j. Our loops ensure i_param < j_param.
+                # The segment is current_route[i_param : j_param+1]
+                # Smallest i_param is 1. Smallest j_param is i_param + 2 (due to skip). So j_param is at least 3.
+                # Largest i_param is n-2.
+                # Largest j_param is n-1.
+                # Example: n=4, route=[N0,N1,N2,N3]
+                # i_param loop: range(1, 3) -> i_param = 1, 2
+                #   if i_param = 1:
+                #     j_param loop: range(2, 4) -> j_param = 2, 3
+                #       if j_param = 2: (j-i=1) skip.
+                #       if j_param = 3: (j-i=2) op(route, 1, 3). seg=[N1,N2,N3]. rev=[N3,N2,N1]. new=[N0,N3,N2,N1]
+                #   if i_param = 2:
+                #     j_param loop: range(3, 4) -> j_param = 3
+                #       if j_param = 3: (j-i=1) skip.
+
+                # NewRoute ← NeighborhoodOperator(CurrentRoute, IndexI, IndexJ)
+                # Assuming neighborhood_operator is two_opt
+                new_route = neighborhood_operator(best_route, i_param, j_param)
+                
+                # NewDistance ← CALCULATE_ROUTE_DISTANCE(NewRoute)
+                new_cost = calculate_route_cost(new_route, edge_data, truck_speed, clearing_rate)
+                
+                # If NewDistance is less than OriginalDistance:
+                if new_cost < current_best_cost:
+                    # Update CurrentRoute to NewRoute
+                    best_route = new_route # Keep the new route
+                    # Update OriginalDistance to NewDistance
+                    current_best_cost = new_cost
+                    # BetterSolutionFound ← TRUE
+                    better_solution_found = True
+                    # As soon as a better solution is found, VNS typically restarts
+                    # the neighborhood search from the beginning of the neighborhood.
+                    # This is a "first improvement" strategy.
+                    break  # Exit j_param loop (inner loop)
+            if better_solution_found:
+                # If an improvement was found in the inner loop,
+                # break the outer loop to restart the while loop with the new best_route.
+                break # Exit i_param loop (outer loop)
+                
+    return best_route
+
+
+```
+
+```{python}
+# Please change this code with real python code with the variables and instructions from above lines:
+"""
+    Function VARIABLE_NEIGHBORHOOD_SEARCH(InitialTour, DistanceMatrix, MaxShakeStrengthK, NeighborhoodOperator):
+    CurrentShakeStrengthK ← 1
+    TotalExplorationTime ← 0
+    TotalExploitationTime ← 0
+        White CurrentShakeStrengthK is less than or equal to MaxShakeStrenthK:
+        {
+        Record StartTime
+        PerturbedRoute ← SHAKING(InitialRoute, CurrentShakingStrenthK)
+        Record EndTime
+        Add (EndTime – StartTime) to TotalExplorationTime
+
+        Record StartTime
+        ImprovedRoute ← LOCAL_SEARCH(PerturbedRoute)
+        Record EndTime
+        Add (EndTime – StartTime) to TotalExploitationTime
+
+        If CALCULATE_ROUTE_DISTANCE(ImprovedRoute) is less than CALCULATE_ROUTE_DISTANCE(InitialRoute):
+            [
+            Update InitialRoute to ImprovedRoute
+            CurrentShakeStrengthK ← 1
+        Else:
+            Increment CurrentShakeStrengthK
+            ]
+        }
+    Output InitialRoute, TotalExplorationTime, TotalExploitationTime
+"""
+def variable_neighborhood_search(initial_route, edge_data, max_shake_strength_k, neighborhood_operator, truck_speed=9, clearing_rate=10):
+    """
+    Implements the Variable Neighborhood Search (VNS) algorithm.
+
+    Args:
+        initial_route (list): The starting route (list of node IDs).
+        edge_data (gpd.GeoDataFrame): GeoDataFrame with edge information.
+                                      Used by calculate_route_cost.
+        max_shake_strength_k (int): The maximum shake strength to explore.
+        neighborhood_operator (function): A function used by local_search
+                                          (e.g., two_opt).
+        truck_speed (float): Speed of the truck in meters per hour.
+        clearing_rate (float): Rate at which debris is cleared in CYD per hour.
+
+    Returns:
+        tuple: A tuple containing:
+            - list: The best route found.
+            - float: Total time spent in shaking (exploration).
+            - float: Total time spent in local search (exploitation).
+    """
+    current_route = list(initial_route) # Start with a copy of the initial route
+    current_shake_strength_k = 1
+    total_exploration_time = 0
+    total_exploitation_time = 0
+
+    # Calculate initial cost
+    initial_cost = calculate_route_cost(current_route, edge_data, truck_speed, clearing_rate)
+
+    while current_shake_strength_k <= max_shake_strength_k:
+        # Record StartTime for shaking
+        start_time_shake = pd.Timestamp.now()
+
+        # PerturbedRoute ← SHAKING(InitialRoute, CurrentShakingStrenthK)
+        # Note: SHAKING should operate on the *current_route*, not the original initial_route
+        perturbed_route = shaking(current_route, current_shake_strength_k)
+
+        # Record EndTime for shaking
+        end_time_shake = pd.Timestamp.now()
+        # Add (EndTime – StartTime) to TotalExplorationTime
+        total_exploration_time += (end_time_shake - start_time_shake).total_seconds()
+
+        # Record StartTime for local search
+        start_time_local_search = pd.Timestamp.now()
+
+        # ImprovedRoute ← LOCAL_SEARCH(PerturbedRoute)
+        improved_route = local_search(perturbed_route, edge_data, neighborhood_operator, truck_speed, clearing_rate)
+
+        # Record EndTime for local search
+        end_time_local_search = pd.Timestamp.now()
+        # Add (EndTime – StartTime) to TotalExploitationTime
+        total_exploitation_time += (end_time_local_search - start_time_local_search).total_seconds()        
+
+
+
+
+
+```
+
+```{python}
+"""
+
+"""
+```
+
+```{python}
+"""
+
+"""
+```

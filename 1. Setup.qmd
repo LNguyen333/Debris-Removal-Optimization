@@ -35,16 +35,20 @@ execute:
 
 {{< pagebreak >}}
 
-# Import Libraries
+# Setting Up Data
 
 Notes:
 - os.chdir(): changes the current working directory to a specific path
 - os.getcwd(): gets current working directory
 
 ```{python}
+# Import libraries
 import pulp
 import pandas as pd
 import geopandas as gpd
+import numpy as np
+import random
+import math
 from shapely import wkt
 from shapely.geometry import Point, LineString
 
@@ -53,11 +57,7 @@ print("Current Working Directory:", os.getcwd())
 
 # Set the working directory to the project root if necessary
 os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
-```
 
-# Import Data
-
-```{python}
 # Get the directory where current Python script is located. This makes paths relative to the project's root
 script_directory = os.path.dirname(__file__)
 
@@ -66,6 +66,8 @@ Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
 OSM_path = os.path.join(script_directory, 'input', 'OSM')
 QGIS_path = os.path.join(script_directory, 'input', 'QGIS')
 focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area 2') # Change file here for different focus area
+
+output_base_dir = os.path.join(script_directory, 'output', '1. Setup')
 ```
 
 ## Lee County
@@ -110,8 +112,8 @@ focus_area_edges_df = pd.read_csv(focus_area_edges_path)
 focus_area_piles_df = pd.read_csv(focus_area_piles_path)
 focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
 focus_area_dms_df = pd.read_csv(focus_area_dms_path)
-focus_area_hospital_path = pd.read_csv(focus_area_hospital_path)
-focus_area_fuel_site_path = pd.read_csv(focus_area_fuel_site_path)
+focus_area_hospital_df = pd.read_csv(focus_area_hospital_path)
+focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
 ```
 
 If necessary, check coordinate reference system
@@ -122,15 +124,22 @@ print("Node CRS:", focus_area_nodes_gdf.crs)
 
 {{< pagebreak >}}
 
-# Focus Area: Convert Data to GeoDataFrames
+# Data Utilization and Transformation
+
+## Node and Edge Data
 
 Transform pandas dataframe into a GeoDataFrame
+
 ```{python}
 # Convert nodes to GeoDataFrames using the WKT column
 
 focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads) # [a1] This line creates a new 'geometry' column in the focus_area_nodes_df DataFrame, where each row's geometry is derived from the 'WKT' (Well-Known Text) column.
 
 focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326") # [a2] converts the pandas DataFrame focus_area_nodes_df into a GeoDataFrame (focus_area_nodes_gdf).
+
+# Convert edges to GeoDataFrames using the WKT column
+focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads) # [b1]
+focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326") # [b2]
 ```
 
 [a1]
@@ -141,14 +150,10 @@ focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry'
 - geometry='geometry': Specifies that the 'geometry' column in the DataFrame contains the geometric data.
 - crs="EPSG:4326": Sets the Coordinate Reference System (CRS) of the GeoDataFrame to EPSG:4326
 
-```{python}
-# Convert edges to GeoDataFrames using the WKT column
-focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads) # [b1]
-focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326") # [b2]
-```
-
 [b1] & [b2]
-- Same as before but for edges
+- Same as [a1] and [a2] but for edges
+
+## Fire Station Data
 
 ```{python}
 # Convert fire station data to GeoDataFrames using Longitude and Latitude columns
@@ -157,6 +162,28 @@ focus_area_fire_station_df['geometry'] = focus_area_fire_station_df.apply(lambda
 focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geometry='geometry', crs="EPSG:4326") # [c2]
 
 # print(focus_area_fire_station_gdf.head()) # Prints the first few rows (by default, 5) of the newly created GeoDataFrame to check for errors
+
+# Find nearest nodes to fire stations
+foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [c3] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each fire station in focus_area_fire_station_gdf
+
+# print(foucs_area_fire_station_to_node.head()) # Prints the first few rows of the foucs_area_fire_station_to_node DataFrame to check for errors
+
+# Rename columns for excel
+foucs_area_fire_station_to_node = foucs_area_fire_station_to_node.rename(columns={
+    'y': 'node_latitude', 
+    'x': 'node_longitude'
+}) # [c4]
+
+# Select only the relevant columns
+foucs_area_fire_station_to_node = foucs_area_fire_station_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [c5]
+
+# Save outputs to CSV file
+output_file_name = 'focus_area_fire_station_node.csv'
+
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+foucs_area_fire_station_to_node.to_csv(full_output_path, index=False) # [c6]
+print(f"Successfully saved data to: {full_output_path}")
 ```
 
 [c1]
@@ -166,16 +193,9 @@ focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geome
 [c2]
 - Same as before but for fire stations
 
-## Assign to nearest nodes
+Assign to nearest node.
 
-```{python}
-# Find nearest nodes to fire stations
-foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [d1] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each fire station in focus_area_fire_station_gdf
-
-# print(foucs_area_fire_station_to_node.head()) # Prints the first few rows of the foucs_area_fire_station_to_node DataFrame to check for errors
-```
-
-[d1]
+[c3]
 - gpd.sjoin_nearest(): Core function for performing a nearest neighbor spatial join.
 - focus_area_fire_station_gdf: Contains the fire stations and acts as the "left" DataFrame in the join
 - focus_area_nodes_gdf: Contains the network nodes and acts as the "right" DataFrame in the join.
@@ -185,25 +205,10 @@ foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf,
 - distance_col="distance_to_node": Adds a new column named "distance_to_node" to the resulting DataFrame. 
     - Contain the spatial distance between each fire station and its nearest node.
 
-
-```{python}
-# Rename columns for excel
-foucs_area_fire_station_to_node = foucs_area_fire_station_to_node.rename(columns={
-    'y': 'node_latitude', 
-    'x': 'node_longitude'
-}) # [e1]
-
-# Select only the relevant columns
-foucs_area_fire_station_to_node = foucs_area_fire_station_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [e2]
-
-# Save outputs to CSV file
-foucs_area_fire_station_to_node.to_csv(r'C:\Users\leanh\Documents\Storm Debris Removal\output\1. Setup\focus_area_fire_station_node.csv', index=False) # [e3]
-```
-
-[e1]
+[c4]
 - Replaces y and x to node_latitude and node_longitude, respectively
 
-[e2]
+[c5]
 - Creates new DataFrame containing only the columns listed within [[ ]]
     - 'Name': The name of the fire station.
     - 'Address': The address of the fire station.
@@ -214,11 +219,11 @@ foucs_area_fire_station_to_node.to_csv(r'C:\Users\leanh\Documents\Storm Debris R
     - 'node_latitude': The latitude of the nearest network node (which was renamed from 'y').
     - 'node_longitude': The longitude of the nearest network node (which was renamed from 'x').
 
-[e3]
+[c6]
 - index=False: tells pandas not to write the DataFrame's index as a column in the CSV file. 
     - To keep the CSV file cleaner and only include the actual data columns.
 
-## DMS
+## Debris Management Site Data
 
 ```{python}
 # Convert DMS data to GeoDataFrames using Longitude and Latitude columns
@@ -226,12 +231,10 @@ focus_area_dms_df['geometry'] = focus_area_dms_df.apply(lambda row: Point(row['L
 
 focus_area_dms_gdf = gpd.GeoDataFrame(focus_area_dms_df, geometry='geometry', crs="EPSG:4326")
 
-# print(focus_area_dms_gdf.head())
-
 # Find nearest nodes for DMS locations
 focus_area_dms_to_node = gpd.sjoin_nearest(focus_area_dms_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
 
-print(focus_area_dms_to_node.head())
+# print(focus_area_dms_to_node.head())
 
 # Rename columns for excel
 focus_area_dms_to_node = focus_area_dms_to_node.rename(columns={
@@ -243,79 +246,182 @@ focus_area_dms_to_node = focus_area_dms_to_node.rename(columns={
 focus_area_dms_to_node = focus_area_dms_to_node[['Disposal Site', 'Address 1', 'Citation', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']]
 
 # Save outputs to CSV file
-focus_area_dms_to_node.to_csv(r'C:\Users\leanh\Documents\Storm Debris Removal\output\1. Setup\focus_area_dms_node.csv', index=False)
+output_file_name = 'focus_area_dms_node.csv'
+
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+focus_area_dms_to_node.to_csv(full_output_path, index=False)
 ```
 
 - Similar to previous code blocks except for DMS
 
-{{< pagebreak >}}
-
-# Focus Area: Convert and Assign Debris Data
-
+## Hospitals
 ```{python}
-target_date = "10/19/2022"  # Define your target date as a string
+# Convert hospital data to GeoDataFrames using Longitude and Latitude columns
+focus_area_hospital_df['geometry'] = focus_area_hospital_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [c1]
 
-# Convert 'Load Date' column to datetime objects if it's not already
-focus_area_loads_df['Load Date'] = pd.to_datetime(focus_area_loads_df['Load Date']) # [g1]
+focus_area_hospital_gdf = gpd.GeoDataFrame(focus_area_hospital_df, geometry='geometry', crs="EPSG:4326") # [c2]
 
-# Filter the DataFrame for the target date
-focus_area_loads_df = focus_area_loads_df[focus_area_loads_df['Load Date'].dt.strftime('%m/%d/%Y') == target_date] # [g2]
+# Find nearest nodes to hospitals
+foucs_area_hospital_to_node = gpd.sjoin_nearest(focus_area_hospital_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [c3] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each hospital in focus_area_hospital_gdf
+
+# Rename columns for excel
+foucs_area_hospital_to_node = foucs_area_hospital_to_node.rename(columns={
+    'y': 'node_latitude', 
+    'x': 'node_longitude'
+}) # [c4]
+
+# Select only the relevant columns
+foucs_area_hospital_to_node = foucs_area_hospital_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [c5]
+
+# Save outputs to CSV file
+output_file_name = 'focus_area_hospital_node.csv'
+
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+foucs_area_hospital_to_node.to_csv(full_output_path, index=False) # [c6]
 ```
 
-[g1]
-- pd.to_datetime(): Converts values in the 'Load Date' column of the focus_area_loads_df DataFrame into datetime objects.
+## Fuel Stations
+focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
+```{python}
+# Convert fuel station data to GeoDataFrames using Longitude and Latitude columns
+focus_area_fuel_site_df['geometry'] = focus_area_fuel_site_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [c1]
 
-[g2]
-- focus_area_loads_df[...]: Uses the boolean Series to index the focus_area_loads_df DataFrame. 
-    - Only the rows where the boolean Series is True (meaning the 'Load Date' matches the target_date) are kept in the updated focus_area_loads_df DataFrame.
+focus_area_fuel_site_gdf = gpd.GeoDataFrame(focus_area_fuel_site_df, geometry='geometry', crs="EPSG:4326") # [c2]
+
+# Find nearest nodes to fuel station
+foucs_area_fuel_site_to_node = gpd.sjoin_nearest(focus_area_fuel_site_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [c3] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each fuel site in focus_area_fuel_site_gdf
+
+# Rename columns for excel
+foucs_area_fuel_site_to_node = foucs_area_fuel_site_to_node.rename(columns={
+    'y': 'node_latitude', 
+    'x': 'node_longitude'
+}) # [c4]
+
+# Select only the relevant columns
+foucs_area_fuel_site_to_node = foucs_area_fuel_site_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [c5]
+
+# Save outputs to CSV file
+output_file_name = 'focus_area_fuel_site_node.csv'
+
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+foucs_area_fuel_site_to_node.to_csv(full_output_path, index=False) # [c6]
+```
+
+{{< pagebreak >}}
+
+## Debris Pile Data
+
+```{python}
+focus_area_piles_df['geometry'] = focus_area_piles_df.apply(lambda row: Point(row['Pile_Longi'], row['Pile_Latit']), axis=1) # [d3]
+
+focus_area_piles_gdf = gpd.GeoDataFrame(focus_area_piles_df, geometry='geometry', crs="EPSG:4326")
+# print("focus_area_piles_gdf created. Head:")
+# print(focus_area_piles_gdf.head())
+
+# Assign a cubic yard volume value for each debris pile based on their type
+
+# Define categories of debris types for volume assignment
+debris_types_cd_related = ["C and D", "Compact CD", "Concrete", "Concrete to FDS", "Sand CD", "Residual Compact CD"]
+
+debris_types_vegetation_related = ["Vegetation", "Mulch", "Dirty Mulch", "Reuse Mulch"]
+
+debris_types_zero_volume = ["Clean Sand Soil", "Dirty Sand Soil", "HHW to DMS","E-Waste to FDS", "White Good to FDS", "Putrescent", "Dock Section"]
+
+
+# Function to assign random CYD based on type
+def assign_cyd_volume(debris_type):
+    if debris_type in debris_types_cd_related:
+        # For C&D related, assign random value from 1 to 100 CYD
+        # Source: This is an assumption based on common ranges for individual debris piles
+        # (not truck loads), reflecting variability in pile size.
+        # While precise external studies for individual pile volumes are scarce,
+        # this range balances small debris accumulations with larger, single-source debris piles.
+        # It's a stochastic approach to introduce variability.
+        return np.random.randint(1, 101) # Generates integers from 1 to 100 inclusive
+    elif debris_type in debris_types_vegetation_related:
+        # For Vegetation related, assign random value from 1 to 100 CYD
+        # Source: Similar rationale as C&D. Vegetation piles can vary from small brush to large treefall.
+        # This range accounts for that variability.
+        return np.random.randint(1, 101) # Generates integers from 1 to 100 inclusive
+    elif debris_type in debris_types_zero_volume:
+        # For sand/soil and specific hazardous/white goods/dock sections, assign 0 CYD.
+        # Source: This aligns with your explicit request and implicitly assumes
+        # these types are either negligible in volume for optimization, or are
+        # handled differently (e.g., individual item counts for white goods, or
+        # non-volumetric considerations for sand/soil in this context).
+        return 0
+    else:
+        # Handle any unexpected debris types
+        print(f"Warning: Unknown debris type '{debris_type}'. Assigning 0 CYD.")
+        return 0
+
+
+# Apply the function to create the 'CYD' column in the GeoDataFrame
+focus_area_piles_gdf['CYD'] = focus_area_piles_gdf['fldDebrisC'].apply(assign_cyd_volume)
+# print("CYD volumes assigned. Sample with CYD:")
+# print(focus_area_piles_gdf[['fldDebrisC', 'CYD']].head())
+
+
+# --- Step 3: Find nearest nodes for debris locations ---
+# Use 'osmid_node' as a suffix to distinguish from any 'osmid' in focus_area_piles_gdf if it existed
+
+focus_area_piles_to_node = gpd.sjoin_nearest(focus_area_piles_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
+
+
+# --- Step 4: Sum the "CYD" values for each node ---
+# Group by the node's original OSM ID (now 'osmid_node' in the joined DataFrame)
+cyd_sum_per_node = focus_area_piles_to_node.groupby('index_right')['CYD'].sum()
+# print("Summed CYD per node (sample):")
+# print(cyd_sum_per_node.head())
+
+# Map the calculated sums back to the original focus_area_nodes_gdf
+# .fillna(0) ensures nodes with no associated debris piles get a 'total_CYD' of 0.
+# focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf['osmid'].map(cyd_sum_per_node).fillna(0)
+focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf.index.map(cyd_sum_per_node).fillna(0) # [g5]
+
+# print("focus_area_nodes_gdf updated with 'total_CYD'. Sample:")
+# print(focus_area_nodes_gdf[['osmid', 'total_CYD']].head())
+
+output_file_name = "focus_area_NodalLoads.csv"
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv(full_output_path, index=False)
+
+```
+
+
+[d1]
+- pd.to_datetime(): Converts values in the 'Load Date' column of the focus_area_piles_df DataFrame into datetime objects.
+
+[d2]
+- focus_area_piles_df[...]: Uses the boolean Series to index the focus_area_piles_df DataFrame. 
+    - Only the rows where the boolean Series is True (meaning the 'Load Date' matches the target_date) are kept in the updated focus_area_piles_df DataFrame.
 - .dt: Special accessor that allows access to datetime-like properties of a Series (a single column of a DataFrame).
 - .strftime('%m/%d/%Y'): Formats each datetime object in the 'Load Date' column into a string with the specific format 'month/day/year' (e.g., "10/19/2022"). 
     - To ensure a direct string comparison with the target_date string.
 - == target_date: Compares the formatted date string from the 'Load Date' column with the target_date string. 
     - This comparison results in a boolean Series (True for rows where the dates match, False otherwise).
 
-```{python}
-# Convert debris data to GeoDataFrames using Load Latitude and Load Longitude columns
-focus_area_loads_df['geometry'] = focus_area_loads_df.apply(lambda row: Point(row['Load Longitude'], row['Load Latitude']), axis=1) # [g3]
-
-focus_area_loads_gdf = gpd.GeoDataFrame(focus_area_loads_df, geometry='geometry', crs="EPSG:4326")
-
-# print(focus_area_loads_gdf.head())
-
-# Find nearest nodes for debris locations
-focus_area_loads_to_node = gpd.sjoin_nearest(focus_area_loads_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
-
-# print(focus_area_loads_to_node.head())
-```
-
-[g3] 
+[d3] 
 - Similar to before except for debris data
 
-```{python}
-# Sum the "CYD" values for each node by grouping by the index of the nodes GeoDataFrames
-cyd_sum_per_node = focus_area_loads_to_node.groupby('index_right')['CYD'].sum() # [g4]
-
-# Assign this sum as a new column
-focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf.index.map(cyd_sum_per_node).fillna(0) # [g5]
-
-# Export the updated nodes GeoDataFrame to a CSV file
-focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv(r'C:\Users\leanh\Documents\Storm Debris Removal\output\1. Setup\focus_area_NodalLoads.csv', index=False)
-```
-
-[g4]
+[d4]
 - cyd_sum_per_node: The result is a pandas Series where the index is the unique values from the 'index_right' column (representing node indices) and the values are the total sum of 'CYD' for each of those nodes.
 - .groupby('index_right'): This groups the rows in focus_area_loads_to_node based on the values in the column named 'index_right'. 
     - 'index_right' contains the index values from your focus_area_nodes_gdf, effectively linking each debris load to a specific node in your network
 - ['CYD']: After grouping, this selects the 'CYD' column for each group. This column likely contains the amount of debris for each load.
 - .sum(): This calculates the sum of the 'CYD' values for all the rows within each group (i.e., for all debris loads associated with the same node)
-[g5]
+[d5]
 - focus_area_nodes_gdf.index: This accesses the index of the focus_area_nodes_gdf. It's assumed that the index of this GeoDataFrame corresponds to the 'index_right' values used in the groupby() operation.
 
 ## Nodes to Edges Assignment
 
 ```{python}
 # Load nodal loads of focus area
-focus_area_NodalLoads_path = r'output\focus_area_NodalLoads.csv'
+focus_area_NodalLoads_path = os.path.join(output_base_dir, 'focus_area_NodalLoads.csv')
 
 focus_area_NodalLoads_df = pd.read_csv(focus_area_NodalLoads_path)
 
@@ -365,11 +471,14 @@ def calculate_edge_load(row):
 # Apply the function to each edge
 focus_area_edges_df['split_CYD'] = focus_area_edges_df.apply(calculate_edge_load, axis=1)
 
+output_file_name = "focus_area_EdgeLoads.csv"
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
 # Select only the relevant columns and export to a new CSV
-focus_area_edges_df[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'split_CYD']].to_csv('output/focus_area_EdgeLoads.csv', index=False)
+focus_area_edges_df[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'split_CYD']].to_csv(full_output_path, index=False)
 
 # Load the edge loads data
-focus_area_EdgeLoads_path = r'output\focus_area_EdgeLoads.csv'
+focus_area_EdgeLoads_path = os.path.join(output_base_dir, 'focus_area_EdgeLoads.csv')
 
 focus_area_EdgeLoads_df = pd.read_csv(focus_area_EdgeLoads_path)
 
@@ -384,12 +493,15 @@ combined_edges = focus_area_EdgeLoads_df.groupby('node_pair').agg({
 # Rename columns for excel
 combined_edges = combined_edges.rename(columns={'split_CYD': 'total_split_CYD'})
 
+output_file_name = "focus_area_EdgeLoads_Combined.csv"
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
 # Select only the relevant columns and export to a new CSV
-combined_edges[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'total_split_CYD']].to_csv('output/focus_area_EdgeLoads_Combined.csv', index=False)
+combined_edges[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'total_split_CYD']].to_csv(full_output_path, index=False)
 
 ```
 
-## Truck Assignment
+## Haul In/Out Truck
 I want to extract data from Lee_Country_Daily_Report.xlsx from my input file. Then, I want to extract data from the "Truck" sheet. IN this sheet, there is a "Date" column, "Haul in/out" column, and "Data" column. However, the dates repeat twice because in the Haul in/out column, there is data for "10/19 Haul in Trucks/Trailers:" and "10/19 Haul out Trucks/Trailers:" But for now, i just want the data from 10/19/2022 as my focus area.
 
 I want to extract data from Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv from my input file. This file has a "Load Date" column and "Disposal Site" column and "CYD" column. I only want to use the data from 10/19/2022 for my focus area. However, the disposal site column has names that repeat, so i want to combine the repeated disposal sites into one and add their total cyd. Place this data in a new excel file  called "Truck Assignment.csv". 
@@ -401,35 +513,100 @@ Then, I want to place this data in the excel file "Truck Assignment.csv" as a ne
 ```{python}
 # Load the Truck sheet from the Excel file
 truck_data = pd.read_excel(daily_path, sheet_name="Truck")
-truck_data = truck_data[truck_data["Date"] == "10/19/2022"]
-haul_in_trucks = truck_data[truck_data["Haul in/out"].str.contains("Haul in", case=False, na=False)]
-# print(haul_in_trucks)
 
-# Load the disposal site data from the CSV
-disposal_data = pd.read_csv(load_path)
-disposal_data = disposal_data[disposal_data["Load Date"] == "10/19/2022"]
+# Define the coefficients of the polynomial in descending order of power
+# y = -5E-10x^6 + 4E-07x^5 - 0.0001x^4 + 0.0143x^3 - 1.0547x^2 + 35.076x - 157.04
+coefficients = [-5e-10, 4e-07, -0.0001, 0.0143, -1.0547, 35.076, -157.04]
 
-# Group by Disposal Site and sum up the CYD
-disposal_summary = disposal_data.groupby("Disposal Site", as_index=False)["CYD"].sum()
-# print(disposal_summary)
+# Generate a random integer for x (time period) within the specified range [15, 64]
+random_x = random.randint(15, 64)
 
-# Calculate total number of Haul In Trucks
-total_trucks = haul_in_trucks["Data"].sum()
-print(total_trucks)
+# Calculate the value of y (number of haul_in trucks) using the polynomial equation
+# np.polyval evaluates the polynomial defined by 'coefficients' at the value 'random_x'.
+haul_in_trucks_float = np.polyval(coefficients, random_x)
 
-# Calculate proportion of CYD for each site
-disposal_summary["Proportion"] = disposal_summary["CYD"] / disposal_summary["CYD"].sum()
+# Since 'y' represents the number of trucks, it should be a non-negative integer.
+# Round the result to the nearest integer and ensure it's not negative.
+haul_in_trucks = max(0, round(haul_in_trucks_float))
 
-# Assign trucks based on CYD proportion
-disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round()
+print(f"Randomly selected time period (x): {random_x}")
+print(f"Calculated number of haul_in trucks (y): {haul_in_trucks}")
 
-# Add the Load Date column
-disposal_summary.insert(0, "Load Date", "10/19/2022")
+# Save outputs to CSV file
+output_file_name = 'haul_in_trucks_value.txt'
 
-# Assign trucks based on CYD proportion
-disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round()
+full_output_path = os.path.join(output_base_dir, output_file_name)
 
-# Save the output to a new Excel file
-disposal_summary.to_csv("output/Truck Assignment.csv", index=False)
+with open(full_output_path, 'w') as f:
+        f.write(str(haul_in_trucks)) # Convert the number to a string before writing
+print(f"Successfully saved haul_in_trucks to: {full_output_path}")
+
+# foucs_area_fire_station_to_node.to_csv(full_output_path, index=False) # [c6]
+# print(f"Successfully saved data to: {full_output_path}")
+```
+
+## Trucks to DMS
+```{python}
+# --- 2. Load focus_area_dms_node.csv ---
+dms_nodes_file_name = "focus_area_dms_node.csv"
+dms_nodes_full_path = os.path.join(output_base_dir, dms_nodes_file_name)
+
+focus_area_dms_node_df = pd.read_csv(dms_nodes_full_path)
+
+num_disposal_sites = len(focus_area_dms_node_df)
+print(f"Number of disposal sites found: {num_disposal_sites}")
+
+# Calculate the base number of trucks each site receives
+base_trucks_per_site = math.ceil(haul_in_trucks / num_disposal_sites)
+print(f"base trucks: {base_trucks_per_site}")
+
+# Initialize the 'Trucks' column with the base number
+focus_area_dms_node_df['Trucks'] = base_trucks_per_site
+
+print("\nTrucks assigned to disposal sites:")
+print(focus_area_dms_node_df[['Disposal Site', 'Trucks']].head(num_disposal_sites))
+
+assigned_total = focus_area_dms_node_df['Trucks'].sum()
+print(f"\nTotal haul_in_trucks: {haul_in_trucks}")
+print(f"Total trucks assigned: {assigned_total}")
+
+# --- 4. Export the updated DataFrame ---
+output_dms_file_name = "focus_area_dms_node_with_trucks.csv"
+full_output_dms_path = os.path.join(output_base_dir, output_dms_file_name)
+focus_area_dms_node_df.to_csv(full_output_dms_path, index=False)
+```
+
+
+```{python}
+# # truck_data = truck_data[truck_data["Date"] == "10/19/2022"]
+# haul_in_trucks = truck_data[truck_data["Haul in/out"].str.contains("Haul in", case=False, na=False)]
+# # print(haul_in_trucks)
+
+# # Load the disposal site data from the CSV
+# disposal_data = pd.read_csv(load_path)
+# disposal_data = disposal_data[disposal_data["Load Date"] == "10/19/2022"]
+
+# # Group by Disposal Site and sum up the CYD
+# disposal_summary = disposal_data.groupby("Disposal Site", as_index=False)["CYD"].sum()
+# # print(disposal_summary)
+
+# # Calculate total number of Haul In Trucks
+# total_trucks = haul_in_trucks["Data"].sum()
+# print(total_trucks)
+
+# # Calculate proportion of CYD for each site
+# disposal_summary["Proportion"] = disposal_summary["CYD"] / disposal_summary["CYD"].sum()
+
+# # Assign trucks based on CYD proportion
+# disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round()
+
+# # Add the Load Date column
+# disposal_summary.insert(0, "Load Date", "10/19/2022")
+
+# # Assign trucks based on CYD proportion
+# disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round()
+
+# # Save the output to a new Excel file
+# disposal_summary.to_csv("output/Truck Assignment.csv", index=False)
 ```
 
