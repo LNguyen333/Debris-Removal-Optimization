@@ -151,8 +151,7 @@ with open(full_file_path, 'r') as f:
 # Calculate route cost (distance + debris clearing time)
 def calculate_route_cost(route, edge_data, truck_speed=9, clearing_rate=10, update_debris=False, debris_update_range=(0, 100)):
     """
-    Calculate the total cost (time) of a route, considering travel and debris clearing.
-    Optionally updates debris on neighboring edges when visiting a node.
+    Calculate the total cost (time) of a route, considering travel and debris clearing. Optionally updates debris on neighboring edges when visiting a node.
 
     Inputs:
         route (list): List of node IDs representing the route.
