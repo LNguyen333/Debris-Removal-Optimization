@@ -1,0 +1,10 @@
+{
+"type": "FeatureCollection",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "fid": 1.0, "name": "Bay Oaks DMS", "Latitude": 26.45035724, "Longitude": -81.94068298000001, "Address 1": "2731 Oak St, Fort Myers Beach, FL 33931", "Citation": "Google Maps", "Assumption": "Google; Similar to FMB Elementary School", "type": "DMS", "Address": null, "Name": null }, "geometry": { "type": "Point", "coordinates": [ -81.94068298, 26.45035724 ] } },
+{ "type": "Feature", "properties": { "fid": 2.0, "name": "FMB Elementary School DMS", "Latitude": 26.44862285, "Longitude": -81.93910093, "Address 1": "Fort Myers Beach, FL 33931", "Citation": "Google Maps", "Assumption": "Google", "type": "DMS", "Address": null, "Name": null }, "geometry": { "type": "Point", "coordinates": [ -81.93910093, 26.44862285 ] } },
+{ "type": "Feature", "properties": { "fid": null, "name": "Fort Myers Beach Fire Department Station 33", "Latitude": 26.41549046, "Longitude": -81.89988029, "Address 1": null, "Citation": null, "Assumption": null, "type": "Fire Station", "Address": "121 Lenell Rd, Fort Myers Beach, FL 33931", "Name": null }, "geometry": { "type": "Point", "coordinates": [ -81.89988029, 26.41549046 ] } },
+{ "type": "Feature", "properties": { "fid": null, "name": "Fort Myers Beach", "Latitude": 26.4449542, "Longitude": -81.93428535, "Address 1": null, "Citation": null, "Assumption": null, "type": "Fire Station", "Address": "100 Voorhis St, Fort Myers Beach, FL 33931", "Name": null }, "geometry": { "type": "Point", "coordinates": [ -81.93428535, 26.4449542 ] } }
+]
+}

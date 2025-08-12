@@ -1,44 +1,46 @@
----
-title: "Debris Removal Process Setup Nodes and Edges"
-author: "Leanh Nguyen (Ln14)"
-
-date: 2025-03-27
-
-format: 
-    html: default
-
-    # YOU DO NOT NEED BOTH PDF AND DOCX.
-    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
-    # pdf:
-    #     documentclass: article
-    #     fontsize: 11pt
-    #     geometry:
-    #         - margin=1in  
-    #     number-sections: true
-    #     code-line-numbers: true
-    docx: 
-       toc: true
-       fig-format: png
-       number-sections: true
-       code-line-numbers: true
-
-date-format: "ddd., MMM. D"
-# bibliography: references.bib
-
-# recommended, but not required
-# you will need jupyter-cache installed
-execute: 
-  cache: true
-  freeze: auto
-  jupyter: python3
----
-
-{{< pagebreak >}}
-
-# Setting Up Data
-Description
-- Imports libraries, set working directory, and set input/output folders
-```{python}
+# type: ignore
+# flake8: noqa
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 # Import libraries
 from functools import partial
 import geopandas as gpd # geospatial data
@@ -55,13 +57,12 @@ from rasterio.warp import calculate_default_transform, reproject
 from rasterio.features import rasterize
 from rasterio.mask import mask
 
+import traceback # extract traces of programs
 from scipy.spatial import KDTree # efficient nearest-neighbor searches
 
 from shapely import wkt # manipulation and analysis of planar geometric objects
 from shapely.geometry import Point, LineString, Polygon
 from shapely.ops import transform as shapely_transform
-
-import traceback # extract traces of programs
 
 # Check the current working directory
 print("Current Working Directory:", os.getcwd())
@@ -79,12 +80,12 @@ QGIS_path = os.path.join(script_directory, 'input', 'QGIS')
 focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area') # Change file here for different focus area
 
 output_base_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area') # Change file here for different focus area
-```
-
-## Lee County
-Description
-- Sets up the input paths to Lee County datasets
-```{python}
+#
+#
+#
+#
+#
+#
 # Load Thompson's daily debris activity report of Crowder Gulf during Hurricane Ian
 daily_path = os.path.join(Lee_County_path, 'Lee_Country_Daily_Report.xlsx')
 
@@ -100,12 +101,12 @@ DMS_path = os.path.join(Lee_County_path, 'DMS.csv')
 
 # Load fire station locations from Lee County's Hurricane Support Map
 fire_station_path = os.path.join(Lee_County_path, 'fire_station.csv')
-```
-
-## QGIS
-Description
-- Sets up the input paths to QGIS data and reads them
-```{python}
+#
+#
+#
+#
+#
+#
 # Load filtered nodes and edges files
 nodes_path = os.path.join(QGIS_path, 'Network_nodes_filtered.csv')
 edges_path = os.path.join(QGIS_path, 'Network_edges_filtered.csv')
@@ -133,22 +134,22 @@ focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
 
 # Load raster file for focus area
 raster_path = os.path.join(focus_area_path, 'Raster Data.tif')
-```
-
-If necessary, check coordinate reference system (CRS)
-```python
-# Check crs
-print("Node CRS:", focus_area_nodes_gdf.crs)
-```
-
-{{< pagebreak >}}
-
-# Data Utilization and Transformation
-
-## Node and Edge Data
-Description
-- Set up nodes and edges and convert to dataframes and geodataframes
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 # Convert nodes to GeoDataFrames using the WKT column
 focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads) # [a1]
 """
@@ -173,14 +174,14 @@ Args:
 # Convert edges to GeoDataFrames using the WKT column
 focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads) # [a1]
 focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326") # [a2]
-```
-
-## Fire Station Data
-Description
-- Set up fire station data, plot to nearest node, and export to csv file
-Note
-- !!!Use KDTree for efficiency!!!
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
 # Convert fire station data to GeoDataFrames using Longitude and Latitude columns
 focus_area_fire_station_df['geometry'] = focus_area_fire_station_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [b1]
 """
@@ -241,14 +242,14 @@ Args:
         - To keep csv file cleaner and only include the actual data columns
 """
 print(f"Successfully saved data to: {full_output_path}")
-```
-
-## Debris Management Site (DMS) Data
-Description
-- Set up DMS data, plot to nearest node, and export to csv file
-Note
-- !!!Use KDTree for efficiency!!!
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
 # Convert DMS data to GeoDataFrames using Longitude and Latitude columns
 focus_area_dms_df['geometry'] = focus_area_dms_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [b1]
 focus_area_dms_gdf = gpd.GeoDataFrame(focus_area_dms_df, geometry='geometry', crs="EPSG:4326") # [a2]
@@ -269,14 +270,14 @@ focus_area_dms_to_node = focus_area_dms_to_node[['Disposal Site', 'Address 1', '
 output_file_name = 'focus_area_dms_node.csv'
 full_output_path = os.path.join(output_base_dir, output_file_name)
 focus_area_dms_to_node.to_csv(full_output_path, index=False) # [b4]
-```
-
-## Hospitals
-Description
-- Set up hospital data, plot to nearest node, and export to csv file
-Note
-- !!!Use KDTree for efficiency!!!
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
 # Convert hospital data to GeoDataFrames using Longitude and Latitude columns
 focus_area_hospital_df['geometry'] = focus_area_hospital_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [b1]
 focus_area_hospital_gdf = gpd.GeoDataFrame(focus_area_hospital_df, geometry='geometry', crs="EPSG:4326") # [a2]
@@ -297,14 +298,14 @@ foucs_area_hospital_to_node = foucs_area_hospital_to_node[['Name', 'Address', 'L
 output_file_name = 'focus_area_hospital_node.csv'
 full_output_path = os.path.join(output_base_dir, output_file_name)
 foucs_area_hospital_to_node.to_csv(full_output_path, index=False) # [b4]
-```
-
-## Fuel Stations
-Description
-- Set up fuel station data, plot to nearest node, and export to csv file
-Note
-- !!!Use KDTree for efficiency!!!
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
 # Convert fuel station data to GeoDataFrames using Longitude and Latitude columns
 focus_area_fuel_site_df['geometry'] = focus_area_fuel_site_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [b1]
 focus_area_fuel_site_gdf = gpd.GeoDataFrame(focus_area_fuel_site_df, geometry='geometry', crs="EPSG:4326") # [a2]
@@ -325,17 +326,17 @@ foucs_area_fuel_site_to_node = foucs_area_fuel_site_to_node[['Name', 'Address', 
 output_file_name = 'focus_area_fuel_site_node.csv'
 full_output_path = os.path.join(output_base_dir, output_file_name)
 foucs_area_fuel_site_to_node.to_csv(full_output_path, index=False) # [b4]
-```
-
-{{< pagebreak >}}
-
-## Debris Pile Data
-Description
-- Set up debris pile data, plot and sum to nearest node, and export to csv file
-Note
-- !!!Use KDTree for efficiency!!!
-- !!!Check 380417 CYD!!!
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 # Convert debris data to GeoDataFrames using Load Latitude and Load Longitude columns
 focus_area_loads_df['geometry'] = focus_area_loads_df.apply(lambda row: Point(row['Load Longitude'], row['Load Latitude']), axis=1) # [b1]
 focus_area_loads_gdf = gpd.GeoDataFrame(focus_area_loads_df, geometry='geometry', crs="EPSG:4326") # [a2]
@@ -363,15 +364,15 @@ focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf.index.map(cyd_sum_per_n
 output_file_name = "focus_area_NodalLoads.csv"
 full_output_path = os.path.join(output_base_dir, output_file_name)
 focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv(full_output_path, index=False) # [b4]
-```
-
-## Nodes to Edges Assignment
-Description
-- Assign and sum node CYD to nearest edge and export to csv file
-Note
-- !!!Use KDTree for efficiency!!!
-- !!!Check 380417 CYD!!!
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
+#
 # Load nodal loads of focus area
 focus_area_NodalLoads_path = os.path.join(output_base_dir, 'focus_area_NodalLoads.csv')
 focus_area_NodalLoads_df = pd.read_csv(focus_area_NodalLoads_path)
@@ -473,14 +474,14 @@ combined_edges = combined_edges.rename(columns={'split_CYD': 'total_split_CYD'})
 output_file_name = "focus_area_EdgeLoads_Combined.csv"
 full_output_path = os.path.join(output_base_dir, output_file_name)
 combined_edges[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'total_split_CYD']].to_csv(full_output_path, index=False)
-```
-
-## Haul In/Out Truck
-Description
-- Get and assign haul-in trucks to each DMS for each date
-Note
-- !!!Use KDTree for efficiency!!!
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
 # Load the Truck datasheet from the Excel file
 truck_data_all = pd.read_excel(daily_path, sheet_name="Truck")
 truck_data_all['Date'] = pd.to_datetime(truck_data_all['Date']).dt.date
@@ -549,8 +550,7 @@ focus_area_dms_node_df = pd.read_csv(dms_nodes_full_path)
 truck_assignment_df = pd.read_csv(truck_assignment_full_path)
 
 # Select and rename the necessary columns from truck_assignment_df for merging
-# truck_data_to_merge = truck_assignment_df.rename(columns={'Assigned Trucks': 'Trucks', 'Load Date': 'Load Date'})
-truck_data_to_merge = truck_assignment_df[['Disposal Site', 'Assigned Trucks', 'Load Date']]
+truck_data_to_merge = truck_assignment_df.rename(columns={'Assigned Trucks': 'Trucks', 'Load Date': 'Load Date'})
 
 # Perform a left merge to add 'Trucks' to focus_area_dms_node_df
 focus_area_dms_node_df = pd.merge(
@@ -559,32 +559,26 @@ focus_area_dms_node_df = pd.merge(
     on=['Disposal Site'],
     how='left'
 )
-# Rename 'Assigned Trucks' to 'Trucks' as per your requirement for the new column name
-focus_area_dms_node_df = focus_area_dms_node_df.rename(columns={'Assigned Trucks': 'Trucks'})
+# Ensure all dates from the full range are included
+focus_area_dms_node_df = pd.merge(all_dates_df, focus_area_dms_node_df, on='Load Date', how='left')
 
-
-
-# # Ensure all dates from the full range are included
-# focus_area_dms_node_df = pd.merge(all_dates_df, focus_area_dms_node_df, on='Load Date', how='left')
-
-# Fill any NaN values in the new 'Trucks' column with 0
-# This handles cases where a disposal site in the focus area might not have
-# corresponding truck assignment data in Truck Assignment.csv
+# Fill NaN values with 0
 focus_area_dms_node_df['Trucks'] = focus_area_dms_node_df['Trucks'].fillna(0).astype(int)
+focus_area_dms_node_df['CYD'] = focus_area_dms_node_df['CYD'].fillna(0)
 
 # --- 5. Export the Updated DataFrame ---
 output_dms_file_name_with_trucks = "focus_area_dms_node_with_trucks.csv"
 full_output_dms_path_with_trucks = os.path.join(output_base_dir, output_dms_file_name_with_trucks)
 focus_area_dms_node_df.to_csv(full_output_dms_path_with_trucks, index=False)
-```
-
-## Raster Debris Data
-Description
-- Get and assign haul-in trucks to each DMS for each date
-Note
-- !!!Assumptions on debris heights!!!
-- !!!Check 380417 CYD!!!
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
+#
 try:
     with rasterio.open(raster_path) as src:
         # Access the CRS object
@@ -630,34 +624,34 @@ except rasterio.errors.RasterioIOError as e:
     print(f"Error opening or reading raster file: {e}")
 except Exception as e:
     print(f"An unexpected error occurred: {e}")
-```
-
-Output:
-    CRS object: EPSG:4326
-    Type of CRS object: <class 'rasterio.crs.CRS'>
-
-    CRS Details:
-    PROJ4 string: +proj=longlat +datum=WGS84 +no_defs=True
-    EPSG code: EPSG:4326
-    Is geographic CRS? True
-    Is projected CRS? False
-    Linear Units: unknown
-    WKT: GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]
-
-CRS object: CRS({'init': 'epsg:32615'}) (or similar):
-- This is the basic string representation of the rasterio.crs.CRS object.
-- 'epsg:32615' is an example of an EPSG code. In this case, 32615 refers to WGS 84 / UTM Zone 15N, which uses meters as its linear unit.
-
-```{python}
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
 # Ensure focus_area_nodes_df has 'geometry' and is a GeoDataFrame as specified by user
 if 'geometry' not in focus_area_nodes_df.columns:
     focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads)
 focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326")
 
 print("GeoDataFrame for nodes created/verified.")
-```
-
-```{python}
+#
+#
+#
 def calculate_debris_volume_from_raster(raster_file_path):
     """
     Reads a raster file, reprojects it, calculates debris volume for each non-zero pixel,
@@ -774,9 +768,9 @@ def calculate_debris_volume_from_raster(raster_file_path):
         print(f"An unexpected error occurred during raster processing: {e}")
         traceback.print_exc() # This will print the detailed traceback
         return []
-```
-
-```{python}
+#
+#
+#
 def map_debris_to_nodes_kdtree(debris_pixels_data, nodes_gdf):
     """
     Maps debris pixels to the nearest network node using a KD-tree and aggregates
@@ -857,9 +851,9 @@ def map_debris_to_nodes_kdtree(debris_pixels_data, nodes_gdf):
     print(f"  Aggregated debris for {len(results_df)} nodes.")
     return results_df
 
-```
-
-```{python}
+#
+#
+#
 # 1. Calculate debris volume from raster pixels
 all_debris_pixels_with_volume = calculate_debris_volume_from_raster(raster_path)
 
@@ -899,9 +893,9 @@ if all_debris_pixels_with_volume:
 
 else:
     print("No debris volumes calculated from raster. Nodal loads not updated from raster.")
-```
-
-```{python}
+#
+#
+#
 # Load nodal loads of focus area
 focus_area_NodalLoads_from_Raster_path = os.path.join(output_base_dir, 'focus_area_NodalLoads_from_Raster.csv')
 
@@ -980,90 +974,82 @@ full_output_path = os.path.join(output_base_dir, output_file_name)
 
 # Select only the relevant columns and export to a new CSV
 combined_edges[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'total_split_CYD']].to_csv(full_output_path, index=False)
-```
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+# Dummy road_centerlines_gdf (representing road segments)
+road_data = {
+    'osmid': [2001, 2002, 2003, 2004],
+    'name': ['Road X', 'Road Y', 'Road Z', 'Road W'],
+    'geometry': [
+        LineString([(-81.995, 26.995), (-81.905, 26.905)]), # Cuts through dummy debris area
+        LineString([(-81.970, 26.980), (-81.930, 26.940)]), # Potentially blocked
+        LineString([(-81.915, 26.915), (-81.895, 26.895)]), # Near dummy high density debris
+        LineString([(-81.900, 26.940), (-81.900, 26.900)]) # Vertical road
+    ]
+}
+road_centerlines_gdf = gpd.GeoDataFrame(road_data, geometry='geometry', crs="EPSG:4326")
+print("Dummy GeoDataFrame for road centerlines created.")
+#
+#
+#
 
-
-# Blocked Roads Analysis
-Sum Output: 
-- 379928.1292. close to the intended target of 380417
-
-If your Raster Data.tif is already a classification of debris (values 0, 1, 2 representing no debris, low debris, high debris), then SegFormer is not needed for the debris identification step itself. Your raster is the debris identification.
-
-Methodology to Determine Roadway Obstructions:
-
-The methodology involves several steps, combining geospatial data processing (vector and raster) with pixel-level analysis to apply your specific blockage criteria.
-
-    1. Data Preparation and Projection:
-
-        Road Network Data: Load your road centerline data (e.g., from OpenStreetMap) into a geopandas.GeoDataFrame. It's crucial that this data represents the road segments accurately. Assume its initial Coordinate Reference System (CRS) is WGS84 (EPSG:4326).
-
-        Debris Raster Data: Load your Raster Data.tif. This raster should contain pixel values indicating debris presence (e.g., 0 for no debris, 1 or 2 for debris).
-
-        Project to a Common CRS: Both the road network and the debris raster must be in the same projected CRS (e.g., a UTM zone like EPSG:26917 for Florida, where units are meters). This is essential for accurate buffering (10 meters) and pixel-to-meter conversions.
-
-    2. Create Road Buffers:
-
-        For each road segment in your projected GeoDataFrame, create a 10-meter buffer. This will generate polygons representing the 10m buffer area around each road centerline.
-
-    3. Analyze Debris within Buffers (Pixel-based Blockage Criteria):
-
-        This is the core of determining "whether or not a road is blocked" based on your definition: "debris that cover the entire width of a road buffer... while partial coverages will be ignored."
-
-            Iterate Through Road Segments: Process each road segment and its corresponding 10-meter buffer individually.
-
-            Mask Debris Raster to Buffer: For each road_buffer polygon, use rasterio.mask or equivalent techniques to extract only the debris pixel data that falls precisely within that buffer. This results in a masked array where pixels outside the buffer are set to a nodata value.
-
-            Define Blockage Criteria: To quantify "entire width coverage" and "partial coverages will be ignored," we use two main criteria:
-                Debris Coverage Ratio: Calculate the percentage of pixels within the road_buffer that are classified as "debris." This filters out roads with only minor debris. A coverage_threshold (e.g., 60%) is set.
-
-                Cross-Sectional Span Check (for "Entire Width"): This is the more sophisticated part.
-
-                    Within the masked debris array for the buffer, identify rows and columns that are entirely filled with debris pixels (meaning, every pixel within that row/column that falls inside the road_buffer polygon is debris).
-
-                    Calculate the proportion of such fully-covered rows and columns relative to the total number of rows/columns that contain any part of the buffer.
-
-                    A span_threshold (e.g., 80%) is applied. If a high percentage of both the row-wise and column-wise "slices" within the buffer are completely covered by debris, it strongly indicates that the debris spans the "entire width" of the road for a significant portion of its length.
-
-            Assign Blockage Status: If both the coverage_ratio and the row_span_ratio and col_span_ratio meet their respective thresholds, the road segment is marked as is_blocked = True.
-
-    4. Output Results:
-
-        Create a new GeoDataFrame that includes the original road network attributes and an additional boolean column (is_blocked) indicating whether each road segment is blocked or not.
-
-        Save this GeoDataFrame as a Shapefile, which can then be visualized in GIS software to see the blocked road segments.
-
-```{python}
-# # Dummy road_centerlines_gdf (representing road segments)
-# road_data = {
-#     'osmid': [2001, 2002, 2003, 2004],
-#     'name': ['Road X', 'Road Y', 'Road Z', 'Road W'],
-#     'geometry': [
-#         LineString([(-81.995, 26.995), (-81.905, 26.905)]), # Cuts through dummy debris area
-#         LineString([(-81.970, 26.980), (-81.930, 26.940)]), # Potentially blocked
-#         LineString([(-81.915, 26.915), (-81.895, 26.895)]), # Near dummy high density debris
-#         LineString([(-81.900, 26.940), (-81.900, 26.900)]) # Vertical road
-#     ]
-# }
-# road_centerlines_gdf = gpd.GeoDataFrame(road_data, geometry='geometry', crs="EPSG:4326")
-# print("Dummy GeoDataFrame for road centerlines created.")
-```
-
-
-I currently have focus_area_nodes_gdf and focus_area_edges_gdf from the following
-focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads) # [a1]
-focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326")
-focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads) # [a1]
-focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326")
-
-I already loaded raster_path, which has 0,1,2 density values
-
-When I run the code below, all the edges in the shapefile are highlighted as block, but this should not be the case
-
-```{python}
+# focus_area_nodes_gdf
+# focus_area_edges_gdf
 
 # --- Methodology for Roadway Obstruction Detection ---
 
-def determine_road_blockage(debris_raster_path, focus_area_edges_gdf, buffer_distance_m=10,
+def determine_road_blockage(debris_raster_path, road_centerlines_gdf, buffer_distance_m=10,
                             coverage_threshold=0.6, span_threshold=0.8):
     """
     Determines if road segments are blocked by debris, based on a debris raster
@@ -1085,15 +1071,15 @@ def determine_road_blockage(debris_raster_path, focus_area_edges_gdf, buffer_dis
         geopandas.GeoDataFrame: A copy of the input road_centerlines_gdf with an
                                 additional 'is_blocked' boolean column.
     """
-    blocked_roads_gdf = focus_area_edges_gdf.copy()
+    blocked_roads_gdf = road_centerlines_gdf.copy()
     blocked_roads_gdf['is_blocked'] = False
     
     # Target CRS for calculations (UTM Zone 17N for Florida, units in meters)
     target_crs = 'EPSG:26917'
 
     print(f"\n--- Starting Road Blockage Analysis (Buffer: {buffer_distance_m}m) ---")
-    print(f"  Projecting road centerlines from {focus_area_edges_gdf.crs} to {target_crs}...")
-    road_centerlines_proj = focus_area_edges_gdf.to_crs(target_crs)
+    print(f"  Projecting road centerlines from {road_centerlines_gdf.crs} to {target_crs}...")
+    road_centerlines_proj = road_centerlines_gdf.to_crs(target_crs)
     print("  Road centerlines projected.")
 
     with rasterio.open(debris_raster_path) as src:
@@ -1249,10 +1235,10 @@ def determine_road_blockage(debris_raster_path, focus_area_edges_gdf, buffer_dis
 # --- Execute the Road Blockage Detection ---
 blocked_roads_output_gdf = determine_road_blockage(
     raster_path, # This is your Raster Data.tif (or where your SegFormer output would go)
-    focus_area_edges_gdf,
+    road_centerlines_gdf,
     buffer_distance_m=10, # 10-meter buffer around road centerline
-    coverage_threshold=0.5, # e.g., 60% of the buffer area must contain debris
-    span_threshold=0.5      # e.g., 80% of rows AND columns in the relevant buffer area must be fully covered by debris
+    coverage_threshold=0.6, # e.g., 60% of the buffer area must contain debris
+    span_threshold=0.8      # e.g., 80% of rows AND columns in the relevant buffer area must be fully covered by debris
 )
 
 # Save the results
@@ -1265,4 +1251,6 @@ print("\nBlocked Road Segments (if any):")
 print(blocked_roads_output_gdf[blocked_roads_output_gdf['is_blocked']])
 print("\nAll Road Segments (with blockage status):")
 print(blocked_roads_output_gdf[['osmid', 'name', 'is_blocked']].head())
-```
+#
+#
+#
