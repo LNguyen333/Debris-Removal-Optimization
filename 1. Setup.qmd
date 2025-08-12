@@ -36,32 +36,36 @@ execute:
 {{< pagebreak >}}
 
 # Setting Up Data
-
-Notes:
-- os.chdir(): changes the current working directory to a specific path
-- os.getcwd(): gets current working directory
-
+Description
+- Imports libraries, set working directory, and set input/output folders
 ```{python}
 # Import libraries
-import pulp
-import pandas as pd
-import geopandas as gpd
-import numpy as np
-import random
-import math
-import rasterio
-import osmnx as ox
-import os
+from functools import partial
+import geopandas as gpd # geospatial data
+import math # standard math functions and constants
+import numpy as np # scientific computing
+import os # operating system interaction
+import osmnx as ox # OpenStreetMap: analysis and visualization of street networks
+import pandas as pd # data manipulation and analysis
+import random # pseudo-random number generator and operations
+
+import rasterio # geospatial raster data
 from rasterio.enums import Resampling
 from rasterio.warp import calculate_default_transform, reproject
-from shapely import wkt
-from shapely.geometry import Point, LineString
-from scipy.spatial import KDTree
+from rasterio.features import rasterize
+from rasterio.mask import mask
+
+import traceback # extract traces of programs
+from scipy.spatial import KDTree # efficient nearest-neighbor searches
+
+from shapely import wkt # manipulation and analysis of planar geometric objects
+from shapely.geometry import Point, LineString, Polygon
+from shapely.ops import transform as shapely_transform
 
 # Check the current working directory
 print("Current Working Directory:", os.getcwd())
 
-# Set the working directory to the project root if necessary
+# Set the current working directory to the project root if necessary
 os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
 
 # Get the directory where current Python script is located. This makes paths relative to the project's root
@@ -77,7 +81,8 @@ output_base_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus ar
 ```
 
 ## Lee County
-
+Description
+- Sets up the input paths to Lee County datasets
 ```{python}
 # Load Thompson's daily debris activity report of Crowder Gulf during Hurricane Ian
 daily_path = os.path.join(Lee_County_path, 'Lee_Country_Daily_Report.xlsx')
@@ -97,7 +102,8 @@ fire_station_path = os.path.join(Lee_County_path, 'fire_station.csv')
 ```
 
 ## QGIS
-
+Description
+- Sets up the input paths to QGIS data and reads them
 ```{python}
 # Load filtered nodes and edges files
 nodes_path = os.path.join(QGIS_path, 'Network_nodes_filtered.csv')
@@ -126,10 +132,9 @@ focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
 
 # Load raster file for focus area
 raster_path = os.path.join(focus_area_path, 'Raster Data.tif')
-
 ```
 
-If necessary, check coordinate reference system
+If necessary, check coordinate reference system (CRS)
 ```python
 # Check crs
 print("Node CRS:", focus_area_nodes_gdf.crs)
@@ -140,294 +145,321 @@ print("Node CRS:", focus_area_nodes_gdf.crs)
 # Data Utilization and Transformation
 
 ## Node and Edge Data
-
-Transform pandas dataframe into a GeoDataFrame
-
+Description
+- Set up nodes and edges and convert to dataframes and geodataframes
 ```{python}
 # Convert nodes to GeoDataFrames using the WKT column
+focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads) # [a1]
+"""
+[a1]
+Creates new geometry column in the focus_area_nodes_df DataFrame, where each row's geometry is dervied from the WKT (Well-Known Text) column
 
-focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads) # [a1] This line creates a new 'geometry' column in the focus_area_nodes_df DataFrame, where each row's geometry is derived from the 'WKT' (Well-Known Text) column.
+Args:
+    - apply(wkt.loads): Applies the wkt.loads function from the shapely.wkt module to each element (WKT string) in the WKT column
+    - wkt.loads: Parses a WKT string and converts it into a Shapely geometry object (e.g., a Point, LineString, or Polygon)
+"""
+focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326") # [a2]
+"""
+[a2]
+Converts the pandas DataFrame focus_area_nodes_df into a GeoDataFrame (focus_area_nodes_gdf)
 
-focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326") # [a2] converts the pandas DataFrame focus_area_nodes_df into a GeoDataFrame (focus_area_nodes_gdf).
+Args:
+    - gpd.GeoDataFrame: Creates a new GeoDataFrame object using the GeoDataFrame constructor
+    - geometry='geometry': Specifies that the 'geometry' column in the DataFrame contains the geometric data
+    - crs="EPSG:4326": Sets the Coordinate Reference System (CRS) of the GeoDataFrame to EPSG:4326
 
+"""
 # Convert edges to GeoDataFrames using the WKT column
-focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads) # [b1]
-focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326") # [b2]
+focus_area_edges_df['geometry'] = focus_area_edges_df['WKT'].apply(wkt.loads) # [a1]
+focus_area_edges_gdf = gpd.GeoDataFrame(focus_area_edges_df, geometry='geometry', crs="EPSG:4326") # [a2]
 ```
 
-[a1]
-- .apply(wkt.loads): Applies the wkt.loads function from the shapely.wkt module to each element (WKT string) in the 'WKT' column.
-- wkt.loads: parses a WKT string and converts it into a Shapely geometry object (e.g., a Point, LineString, or Polygon)
-[a2]
-- gpd.GeoDataFrame(...): Creates a new GeoDataFrame object using the GeoDataFrame constructor
-- geometry='geometry': Specifies that the 'geometry' column in the DataFrame contains the geometric data.
-- crs="EPSG:4326": Sets the Coordinate Reference System (CRS) of the GeoDataFrame to EPSG:4326
-
-[b1] & [b2]
-- Same as [a1] and [a2] but for edges
-
 ## Fire Station Data
-
+Description
+- Set up fire station data, plot to nearest node, and export to csv file
+Note
+- !!!Use KDTree for efficiency!!!
 ```{python}
 # Convert fire station data to GeoDataFrames using Longitude and Latitude columns
-focus_area_fire_station_df['geometry'] = focus_area_fire_station_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [c1]
+focus_area_fire_station_df['geometry'] = focus_area_fire_station_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [b1]
+"""
+[b1]
+Creates new geometry column in the focus_area_fire_station_df DataFrame, where each row's geometry is derived from the Longitude and Latitude columns
 
-focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geometry='geometry', crs="EPSG:4326") # [c2]
-
-# print(focus_area_fire_station_gdf.head()) # Prints the first few rows (by default, 5) of the newly created GeoDataFrame to check for errors
+Args: 
+    - apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1): Applies a function to each row of the DataFrame (axis=1)
+    - lambda row: Point(row['Longitude'], row['Latitude']): An anonymous (lambda) function that takes a row of the DataFrame as input
+        - For each row, it accesses the 'Longitude' and 'Latitude' values and creates a Point object from the shapely.geometry module. Order is (longitude, latitude)
+    - axis=1: Specifies that the function should be applied to each row of the DataFrame (row-wise)
+"""
+focus_area_fire_station_gdf = gpd.GeoDataFrame(focus_area_fire_station_df, geometry='geometry', crs="EPSG:4326") # [a2]
 
 # Find nearest nodes to fire stations
-foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [c3] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each fire station in focus_area_fire_station_gdf
+foucs_area_fire_station_to_node = gpd.sjoin_nearest(focus_area_fire_station_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [b2] 
+"""
+[b2]
+Uses GeoPandas spatial join function to find the nearest node in focus_area_nodes_gdf to each fire station in focus_area_fire_station_gdf
 
-# print(foucs_area_fire_station_to_node.head()) # Prints the first few rows of the foucs_area_fire_station_to_node DataFrame to check for errors
-
-# Rename columns for excel
+Args:
+    - gpd.sjoin_nearest(): Core function for performing a nearest neighbor spatial join.
+    - focus_area_fire_station_gdf: Contains the fire stations and acts as the "left" DataFrame in the join
+    - focus_area_nodes_gdf: Contains the network nodes and acts as the "right" DataFrame in the join.
+    - how="left": Specifies the type of join
+        - A "left" join ensures that all rows from the focus_area_fire_station_gdf are kept in the resulting foucs_area_fire_station_to_node DataFrame
+        - If a nearest node is found, its attributes are added; otherwise, the added columns will have NaN
+    - distance_col="distance_to_node": Adds a new column named "distance_to_node" to the resulting DataFrame
+        - Contain the spatial distance between each fire station and its nearest node
+"""
+# Rename y and x columns in csv file
 foucs_area_fire_station_to_node = foucs_area_fire_station_to_node.rename(columns={
     'y': 'node_latitude', 
     'x': 'node_longitude'
-}) # [c4]
-
+})
 # Select only the relevant columns
-foucs_area_fire_station_to_node = foucs_area_fire_station_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [c5]
-
-# Save outputs to CSV file
+foucs_area_fire_station_to_node = foucs_area_fire_station_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [b3]
+"""
+[b3]
+Args:
+    - 'Name': The name of the fire station
+    - 'Address': The address of the fire station
+    - 'Latitude': The original latitude of the fire station
+    - 'Longitude': The original longitude of the fire station
+    - 'distance_to_node': The calculated distance between the fire station and its nearest network node
+    - 'osmid': The OpenStreetMap ID (or a similar unique identifier) of the nearest network node
+    - 'node_latitude': The latitude of the nearest network node (which was renamed from 'y')
+    - 'node_longitude': The longitude of the nearest network node (which was renamed from 'x')
+"""
+# Save outputs to csv file
 output_file_name = 'focus_area_fire_station_node.csv'
-
 full_output_path = os.path.join(output_base_dir, output_file_name)
-
-foucs_area_fire_station_to_node.to_csv(full_output_path, index=False) # [c6]
+foucs_area_fire_station_to_node.to_csv(full_output_path, index=False) # [b4]
+"""
+[b4]
+Args:
+    - index=False: tells Pandas not to write the DataFrame's index as a column in the CSV file
+        - To keep csv file cleaner and only include the actual data columns
+"""
 print(f"Successfully saved data to: {full_output_path}")
 ```
 
-[c1]
-- .apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1): Applies a function to each row of the DataFrame (axis=1)
-- lambda row: Point(row['Longitude'], row['Latitude']): An anonymous (lambda) function that takes a row of the DataFrame as input. 
-    - For each row, it accesses the 'Longitude' and 'Latitude' values and creates a Point object from the shapely.geometry module. Order is (longitude, latitude)
-[c2]
-- Same as before but for fire stations
-
-Assign to nearest node.
-
-[c3]
-- gpd.sjoin_nearest(): Core function for performing a nearest neighbor spatial join.
-- focus_area_fire_station_gdf: Contains the fire stations and acts as the "left" DataFrame in the join
-- focus_area_nodes_gdf: Contains the network nodes and acts as the "right" DataFrame in the join.
-- how="left": Specifies the type of join. 
-    - A "left" join ensures that all rows from the focus_area_fire_station_gdf are kept in the resulting foucs_area_fire_station_to_node DataFrame. 
-    - If a nearest node is found, its attributes are added; otherwise, the added columns will have NaN values.
-- distance_col="distance_to_node": Adds a new column named "distance_to_node" to the resulting DataFrame. 
-    - Contain the spatial distance between each fire station and its nearest node.
-
-[c4]
-- Replaces y and x to node_latitude and node_longitude, respectively
-
-[c5]
-- Creates new DataFrame containing only the columns listed within [[ ]]
-    - 'Name': The name of the fire station.
-    - 'Address': The address of the fire station.
-    - 'Latitude': The original latitude of the fire station.
-    - 'Longitude': The original longitude of the fire station.
-    - 'distance_to_node': The calculated distance between the fire station and its nearest network node.
-    - 'osmid': The OpenStreetMap ID (or a similar unique identifier) of the nearest network node.
-    - 'node_latitude': The latitude of the nearest network node (which was renamed from 'y').
-    - 'node_longitude': The longitude of the nearest network node (which was renamed from 'x').
-
-[c6]
-- index=False: tells pandas not to write the DataFrame's index as a column in the CSV file. 
-    - To keep the CSV file cleaner and only include the actual data columns.
-
-## Debris Management Site Data
-
+## Debris Management Site (DMS) Data
+Description
+- Set up DMS data, plot to nearest node, and export to csv file
+Note
+- !!!Use KDTree for efficiency!!!
 ```{python}
 # Convert DMS data to GeoDataFrames using Longitude and Latitude columns
-focus_area_dms_df['geometry'] = focus_area_dms_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [f1] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each fire station in focus_area_fire_station_gdf
+focus_area_dms_df['geometry'] = focus_area_dms_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [b1]
+focus_area_dms_gdf = gpd.GeoDataFrame(focus_area_dms_df, geometry='geometry', crs="EPSG:4326") # [a2]
 
-focus_area_dms_gdf = gpd.GeoDataFrame(focus_area_dms_df, geometry='geometry', crs="EPSG:4326")
+# Find nearest nodes to DMS locations
+focus_area_dms_to_node = gpd.sjoin_nearest(focus_area_dms_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [b2]
 
-# Find nearest nodes for DMS locations
-focus_area_dms_to_node = gpd.sjoin_nearest(focus_area_dms_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
-
-# print(focus_area_dms_to_node.head())
-
-# Rename columns for excel
+# Rename y and x columns in csv file
 focus_area_dms_to_node = focus_area_dms_to_node.rename(columns={
     'y': 'node_latitude', 
     'x': 'node_longitude'
 })
 
 # Select only the relevant columns
-focus_area_dms_to_node = focus_area_dms_to_node[['Disposal Site', 'Address 1', 'Citation', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']]
+focus_area_dms_to_node = focus_area_dms_to_node[['Disposal Site', 'Address 1', 'Citation', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [b3]
 
-# Save outputs to CSV file
+# Save outputs to csv file
 output_file_name = 'focus_area_dms_node.csv'
-
 full_output_path = os.path.join(output_base_dir, output_file_name)
-
-focus_area_dms_to_node.to_csv(full_output_path, index=False)
+focus_area_dms_to_node.to_csv(full_output_path, index=False) # [b4]
 ```
 
-- Similar to previous code blocks except for DMS
-
 ## Hospitals
+Description
+- Set up hospital data, plot to nearest node, and export to csv file
+Note
+- !!!Use KDTree for efficiency!!!
 ```{python}
 # Convert hospital data to GeoDataFrames using Longitude and Latitude columns
-focus_area_hospital_df['geometry'] = focus_area_hospital_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [c1]
-
-focus_area_hospital_gdf = gpd.GeoDataFrame(focus_area_hospital_df, geometry='geometry', crs="EPSG:4326") # [c2]
+focus_area_hospital_df['geometry'] = focus_area_hospital_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [b1]
+focus_area_hospital_gdf = gpd.GeoDataFrame(focus_area_hospital_df, geometry='geometry', crs="EPSG:4326") # [a2]
 
 # Find nearest nodes to hospitals
-foucs_area_hospital_to_node = gpd.sjoin_nearest(focus_area_hospital_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [c3] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each hospital in focus_area_hospital_gdf
+foucs_area_hospital_to_node = gpd.sjoin_nearest(focus_area_hospital_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [b2]
 
-# Rename columns for excel
+# Rename y and x columns in csv file
 foucs_area_hospital_to_node = foucs_area_hospital_to_node.rename(columns={
     'y': 'node_latitude', 
     'x': 'node_longitude'
-}) # [c4]
+})
 
 # Select only the relevant columns
-foucs_area_hospital_to_node = foucs_area_hospital_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [c5]
+foucs_area_hospital_to_node = foucs_area_hospital_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [b3]
 
-# Save outputs to CSV file
+# Save outputs to csv file
 output_file_name = 'focus_area_hospital_node.csv'
-
 full_output_path = os.path.join(output_base_dir, output_file_name)
-
-foucs_area_hospital_to_node.to_csv(full_output_path, index=False) # [c6]
+foucs_area_hospital_to_node.to_csv(full_output_path, index=False) # [b4]
 ```
 
 ## Fuel Stations
-focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
+Description
+- Set up fuel station data, plot to nearest node, and export to csv file
+Note
+- !!!Use KDTree for efficiency!!!
 ```{python}
 # Convert fuel station data to GeoDataFrames using Longitude and Latitude columns
-focus_area_fuel_site_df['geometry'] = focus_area_fuel_site_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [c1]
-
-focus_area_fuel_site_gdf = gpd.GeoDataFrame(focus_area_fuel_site_df, geometry='geometry', crs="EPSG:4326") # [c2]
+focus_area_fuel_site_df['geometry'] = focus_area_fuel_site_df.apply(lambda row: Point(row['Longitude'], row['Latitude']), axis=1) # [b1]
+focus_area_fuel_site_gdf = gpd.GeoDataFrame(focus_area_fuel_site_df, geometry='geometry', crs="EPSG:4326") # [a2]
 
 # Find nearest nodes to fuel station
-foucs_area_fuel_site_to_node = gpd.sjoin_nearest(focus_area_fuel_site_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [c3] Uses GeoPandas' spatial join function to find the nearest node in focus_area_nodes_gdf to each fuel site in focus_area_fuel_site_gdf
+foucs_area_fuel_site_to_node = gpd.sjoin_nearest(focus_area_fuel_site_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [b2]
 
-# Rename columns for excel
+# Rename y and x columns in csv file
 foucs_area_fuel_site_to_node = foucs_area_fuel_site_to_node.rename(columns={
     'y': 'node_latitude', 
     'x': 'node_longitude'
-}) # [c4]
+})
 
 # Select only the relevant columns
-foucs_area_fuel_site_to_node = foucs_area_fuel_site_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [c5]
+foucs_area_fuel_site_to_node = foucs_area_fuel_site_to_node[['Name', 'Address', 'Latitude', 'Longitude', 'distance_to_node', 'osmid', 'node_latitude', 'node_longitude']] # [b3]
 
 # Save outputs to CSV file
 output_file_name = 'focus_area_fuel_site_node.csv'
-
 full_output_path = os.path.join(output_base_dir, output_file_name)
-
-foucs_area_fuel_site_to_node.to_csv(full_output_path, index=False) # [c6]
+foucs_area_fuel_site_to_node.to_csv(full_output_path, index=False) # [b4]
 ```
 
 {{< pagebreak >}}
 
 ## Debris Pile Data
-
+Description
+- Set up debris pile data, plot and sum to nearest node, and export to csv file
+Note
+- !!!Use KDTree for efficiency!!!
+- !!!Check 380417 CYD!!!
 ```{python}
-target_date = "10/19/2022"  # Define your target date as a string
-
-# Convert 'Load Date' column to datetime objects if it's not already
-focus_area_loads_df['Load Date'] = pd.to_datetime(focus_area_loads_df['Load Date'])
-
-# Filter the DataFrame for the target date
-focus_area_loads_df = focus_area_loads_df[focus_area_loads_df['Load Date'].dt.strftime('%m/%d/%Y') == target_date]
-
 # Convert debris data to GeoDataFrames using Load Latitude and Load Longitude columns
-focus_area_loads_df['geometry'] = focus_area_loads_df.apply(
-    lambda row: Point(row['Load Longitude'], row['Load Latitude']),
-    axis=1
-)
-focus_area_loads_gdf = gpd.GeoDataFrame(focus_area_loads_df, geometry='geometry', crs="EPSG:4326")
+focus_area_loads_df['geometry'] = focus_area_loads_df.apply(lambda row: Point(row['Load Longitude'], row['Load Latitude']), axis=1) # [b1]
+focus_area_loads_gdf = gpd.GeoDataFrame(focus_area_loads_df, geometry='geometry', crs="EPSG:4326") # [a2]
 
-print(focus_area_loads_gdf.head())
-
-# Find nearest nodes for debris locations
-focus_area_loads_to_node = gpd.sjoin_nearest(focus_area_loads_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
-
-print(focus_area_loads_to_node.head())
+# Find nearest nodes to debris locations
+focus_area_loads_to_node = gpd.sjoin_nearest(focus_area_loads_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node") # [b2]
 
 # Sum the "CYD" values for each node by grouping by the index of the nodes GeoDataFrames
-cyd_sum_per_node = focus_area_loads_to_node.groupby('index_right')['CYD'].sum()
+cyd_sum_per_node = focus_area_loads_to_node.groupby('index_right')['CYD'].sum() # [c1]
+"""
+[c1]
+Generate pandas series where the index is the unique node identifier (from 'index_right') and the corresponding value is the total 'CYD' of all debris loads associated with that specific node
 
+Args:
+    - groupby('index_right'): Groups the dataFrame's rows based on the values in the 'index_right' column. 
+        - This column, as a result of a spatial join, holds the unique index of the node that each debris load was assigned to.
+        - By grouping on this column, create separate groups for each node
+    - ['CYD']: After grouping the DataFrame by node, this selects the 'CYD' column from each of those groups
+    - sum(): This aggregates the data. For each group (i.e., for each node), it sums all the values in the 'CYD' column
+"""
 # Assign this sum as a new column
 focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf.index.map(cyd_sum_per_node).fillna(0)
 
+# Save outputs to CSV file
 output_file_name = "focus_area_NodalLoads.csv"
 full_output_path = os.path.join(output_base_dir, output_file_name)
-
-focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv(full_output_path, index=False)
+focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv(full_output_path, index=False) # [b4]
 ```
 
 ## Nodes to Edges Assignment
-
+Description
+- Assign and sum node CYD to nearest edge and export to csv file
+Note
+- !!!Use KDTree for efficiency!!!
+- !!!Check 380417 CYD!!!
 ```{python}
 # Load nodal loads of focus area
 focus_area_NodalLoads_path = os.path.join(output_base_dir, 'focus_area_NodalLoads.csv')
-
 focus_area_NodalLoads_df = pd.read_csv(focus_area_NodalLoads_path)
 
 # Convert nodal loads data to GeoDataFrames
-focus_area_NodalLoads_df['geometry'] = focus_area_NodalLoads_df.apply(lambda row: Point(row['x'], row['y']), axis=1)
+focus_area_NodalLoads_df['geometry'] = focus_area_NodalLoads_df.apply(lambda row: Point(row['x'], row['y']), axis=1) # [b1]
+focus_area_NodalLoads_gdf = gpd.GeoDataFrame(focus_area_NodalLoads_df, geometry='geometry', crs="EPSG:4326") # [a2]
 
-focus_area_NodalLoads_gdf = gpd.GeoDataFrame(focus_area_NodalLoads_df, geometry='geometry', crs="EPSG:4326")
+# Create a dictionary mapping each node ID to its total_CYD
+node_cyd_dict = focus_area_NodalLoads_df.set_index('osmid')['total_CYD'].to_dict() # [d1]
+"""
+[d1]
+Args:
+    - set_index('osmid'): DataFrame method that changes the index of the DataFrame to the values from the 'osmid' column
+        - The index is a special label for each row
+        - Set it to osmid to easily access data using the node's ID
+    - ['total_CYD']: After the index is set, this part selects the 'total_CYD' column. 
+        - This results in a pandas Series where the index is the osmid and the values are the total debris amounts.
+    - to_dict(): Series method that converts the Series into a standard Python dictionary
+        - The index of the Series (osmid values) becomes the keys of the dictionary, and the values of the Series (total_CYD values) become the values of the dictionary
+"""
+# Counts the number of connections (or degrees) for each node in a network represented by a list of edges 
+# First, count how many times each node appears as a start node (u) and then add that to how many times it appears as an end node (v)
+u_edge_counts = focus_area_edges_df['u'].value_counts() # [d2]
+"""
+[d2]
+Pandas Series where the index is the node ID and the value is the number of times it acts as a starting node
 
-print(focus_area_NodalLoads_gdf.head())
-
-# Create a dictionary mapping each node to its total_CYD
-node_cyd_dict = focus_area_NodalLoads_df.set_index('osmid')['total_CYD'].to_dict()
-
-# Count edges connected to each node (both u and v)
-
-# First, count connections for 'u' nodes
-u_edge_counts = focus_area_edges_df['u'].value_counts()
-print(u_edge_counts)
-
+Args:
+    - value_counts(): Pandas Series method that returns a Series containing counts of unique values. 
+        - Counts how many times each unique node ID appears in the u column.
+"""
 # Count connections for 'v' nodes and add to u_edge_counts
-edge_counts = u_edge_counts.add(focus_area_edges_df['v'].value_counts(), fill_value=0)
-print(edge_counts)
+edge_counts = u_edge_counts.add(focus_area_edges_df['v'].value_counts(), fill_value=0) # [d3]
+"""
+[d3]
+Final result is a panda Series that contains the total number of connections (edges) for each node in the entire network, regardless of whether it's a u or v node.
 
+Args
+    - u_edge_counts.add(): Takes the counts from the u nodes and adds them to the counts from the v nodes
+    - fill_value=0: If a node exists in the u counts but not in the v counts (or vice versa), add() would produce a NaN (Not a Number) value
+        - Set fill_value=0 to ensure that if a node is missing from one of the counts, it's treated as having a count of 0, allowing for a correct total
+"""
 # Convert edge_counts to a dictionary
 edge_counts_dict = edge_counts.to_dict()
 
-# Calculate load split for each edge
 # Define a function to get the load per edge based on u and v nodes
 def calculate_edge_load(row):
+    """
+    Determines the amount of debris on a single edge by distributing the debris load from its connected nodes
+    It takes a single row of a DataFrame (representing an edge) and calculates the edge's total debris load based on the debris at its start and end nodes.
+
+    Args:
+        - row: A single row from a pandas DataFrame 
+            - The row contains columns named 'u' and 'v', representing the start and end nodes of an edge
+    """
+    # Extract the node IDs for the start (u) and end (v) of the edge from the input row
     u, v = row['u'], row['v']
     
-    # Get the total_CYD for each node, or assugb 0 if the node has no associated debris data
+    # Get the total_CYD for each node (u and v) from node_cyd_dict, or assume 0 if the node has no associated debris data
     u_cyd = node_cyd_dict.get(u, 0)
     v_cyd = node_cyd_dict.get(v, 0)
     
-    # Get the number of edges connected to each node
-    u_edge_count = edge_counts_dict.get(u, 1)  # Default to 1 to avoid division by zero
+    # Get the number of edges connected to each node (u and v) from edge_counts_dict
+    # .get() with value of 1 prevents division by zero in next step, which could occur if a node has no other connections but is part of the edge being evaluated
+    u_edge_count = edge_counts_dict.get(u, 1)
     v_edge_count = edge_counts_dict.get(v, 1)
     
-    # Calculate load contribution from each node to this edge
+    # Calculate load contribution from each node to this edge, assuming node's total debris load is evenly distributed among all its connected edges
+    # The total debris at node u (u_cyd) is divided by the total number of edges connected to u (u_edge_count). This calculates the portion of u's debris that is allocated to this specific edge
     u_contribution = u_cyd / u_edge_count if u_edge_count > 0 else 0
     v_contribution = v_cyd / v_edge_count if v_edge_count > 0 else 0
     
     # Total load for the edge is the sum of contributions from u and v nodes
     return u_contribution + v_contribution
 
-# Apply the function to each edge
-focus_area_edges_df['split_CYD'] = focus_area_edges_df.apply(calculate_edge_load, axis=1)
+# Apply the function to each edge, creating a new column called "split_CYD"
+focus_area_edges_df['split_CYD'] = focus_area_edges_df.apply(calculate_edge_load, axis=1) # [b1]
 
+# Select only the relevant columns and save outputs to CSV file
 output_file_name = "focus_area_EdgeLoads.csv"
 full_output_path = os.path.join(output_base_dir, output_file_name)
-
-# Select only the relevant columns and export to a new CSV
 focus_area_edges_df[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'split_CYD']].to_csv(full_output_path, index=False)
 
-# Load the edge loads data
+# Load the edge loads of focus area
 focus_area_EdgeLoads_path = os.path.join(output_base_dir, 'focus_area_EdgeLoads.csv')
-
 focus_area_EdgeLoads_df = pd.read_csv(focus_area_EdgeLoads_path)
 
-# Sort each pair of nodes in u and v, so that (u, v) and (v, u) appear consistently as (min, max)
+# Sort each pair of nodes in u and v, so that (u, v) and (v, u) appear consistently as (min, max) (i.e., (2,3) and (3,2) will be both (2,3) for comparison purposes)
 focus_area_EdgeLoads_df['node_pair'] = focus_area_EdgeLoads_df.apply(lambda row: tuple(sorted((row['u'], row['v']))), axis=1)
 
 # Keep the first osmid and the relevant columns of the first excel
@@ -435,402 +467,115 @@ combined_edges = focus_area_EdgeLoads_df.groupby('node_pair').agg({
     'osmid': 'first', 'u': 'first', 'v': 'first', 'name': 'first', 'WKT': 'first', 'fid': 'first', 'highway': 'first', 'oneway': 'first', 'reversed': 'first', 'length': 'first', 'lanes': 'first', 'ref': 'first', 'access': 'first', 'service': 'first', 'maxspeed': 'first', 'bridge': 'first', 'junction': 'first', 'tunnel': 'first', 'area': 'first', 'width': 'first', 'split_CYD': 'sum'         
 }).reset_index(drop=True)
 
-# Rename columns for excel
+# Rename columns, select only relevant columns, and save outputs to CSV file
 combined_edges = combined_edges.rename(columns={'split_CYD': 'total_split_CYD'})
-
 output_file_name = "focus_area_EdgeLoads_Combined.csv"
 full_output_path = os.path.join(output_base_dir, output_file_name)
-
-# Select only the relevant columns and export to a new CSV
 combined_edges[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'total_split_CYD']].to_csv(full_output_path, index=False)
-
 ```
 
 ## Haul In/Out Truck
-I want to extract data from Lee_Country_Daily_Report.xlsx from my input file. Then, I want to extract data from the "Truck" sheet. IN this sheet, there is a "Date" column, "Haul in/out" column, and "Data" column. However, the dates repeat twice because in the Haul in/out column, there is data for "10/19 Haul in Trucks/Trailers:" and "10/19 Haul out Trucks/Trailers:" But for now, i just want the data from 10/19/2022 as my focus area.
-
-I want to extract data from Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv from my input file. This file has a "Load Date" column and "Disposal Site" column and "CYD" column. I only want to use the data from 10/19/2022 for my focus area. However, the disposal site column has names that repeat, so i want to combine the repeated disposal sites into one and add their total cyd. Place this data in a new excel file  called "Truck Assignment.csv". 
-
-Then using the data from the haul in and haul out truck for 10/19, I want to distribute the amount of haul in trucks proportionately to all of the disposal sites based on their CYD. For example if there were 6 trucks on 10/19/2022 and 3 disposal sites. Site A would get 3 trucks, B get 2 trucks, and C get 1 truck if the ratio of A, B, and C's CYD was 3:2:1
-
-Then, I want to place this data in the excel file "Truck Assignment.csv" as a new column for each disposal site on 10/19/2022
-
+Description
+- Get and assign haul-in trucks to each DMS for each date
+Note
+- !!!Use KDTree for efficiency!!!
 ```{python}
-# Load the Truck sheet from the Excel file
-truck_data = pd.read_excel(daily_path, sheet_name="Truck")
-truck_data = truck_data[truck_data["Date"] == target_date]
-haul_in_trucks = truck_data[truck_data["Haul in/out"].str.contains("Haul in", case=False, na=False)]
-# print(haul_in_trucks)
+# Load the Truck datasheet from the Excel file
+truck_data_all = pd.read_excel(daily_path, sheet_name="Truck")
+truck_data_all['Date'] = pd.to_datetime(truck_data_all['Date']).dt.date
 
 # Load the disposal site data from the CSV
-disposal_data = pd.read_csv(load_path)
-disposal_data = disposal_data[disposal_data["Load Date"] == target_date]
+disposal_data_all = pd.read_csv(load_path)
+disposal_data_all['Load Date'] = pd.to_datetime(disposal_data_all['Load Date']).dt.date
+    # .dt.date: This accesses the datetime properties of the converted column (.dt) and then extracts just the date part, removing any time information.
 
-# Group by Disposal Site and sum up the CYD
-disposal_summary = disposal_data.groupby("Disposal Site", as_index=False)["CYD"].sum()
-# print(disposal_summary)
+# Get the full range of dates to ensure there is an entry for every day
+all_dates = pd.date_range(start='10/05/2022', end='04/19/2023').date
+all_dates_df = pd.DataFrame(all_dates, columns=['Load Date'])
 
-# Calculate total number of Haul In Trucks
-total_trucks = haul_in_trucks["Data"].sum()
-print(total_trucks)
+# Process data for all dates by setting up empty disposal summary
+all_disposal_summary = []
 
-# Calculate proportion of CYD for each site
-disposal_summary["Proportion"] = disposal_summary["CYD"] / disposal_summary["CYD"].sum()
+# Iterate through each unique date in the truck data
+for date in truck_data_all['Date'].unique():
+    # Filter data for the current date
+    truck_data_day = truck_data_all[truck_data_all["Date"] == date]
+    disposal_data_day = disposal_data_all[disposal_data_all["Load Date"] == date]
+    
+    # Filter for Haul in trucks
+    haul_in_trucks = truck_data_day[truck_data_day["Haul in/out"].str.contains("Haul in", case=False, na=False)]
 
-# Assign trucks based on CYD proportion
-disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round()
+    # If there's no data for the day, skip it
+    if haul_in_trucks.empty or disposal_data_day.empty:
+        continue
 
-# Add the Load Date column
-disposal_summary.insert(0, "Load Date", target_date)
+    # Group by Disposal Site and sum up the CYD
+    disposal_summary = disposal_data_day.groupby("Disposal Site", as_index=False)["CYD"].sum()
+    
+    # Calculate total number of Haul In Trucks
+    total_trucks = haul_in_trucks["Data"].sum()
+    
+    # Calculate proportion of CYD for each site
+    disposal_summary["Proportion"] = disposal_summary["CYD"] / disposal_summary["CYD"].sum()
 
-# Assign trucks based on CYD proportion
-disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round()
+    # Assign trucks based on CYD proportion. Round to nearest whole number and convert rounded number into integer (if needed)
+    disposal_summary["Assigned Trucks"] = (disposal_summary["Proportion"] * total_trucks).round().astype(int)
+    
+    # Add the Load Date column
+    disposal_summary.insert(0, "Load Date", date)
+    
+    # Append to the list
+    all_disposal_summary.append(disposal_summary)
 
-# Save the output to a new Excel file
+# Concatenate all daily summaries into a single DataFrame
+if all_disposal_summary:
+    final_disposal_summary = pd.concat(all_disposal_summary, ignore_index=True)
+else:
+    final_disposal_summary = pd.DataFrame(columns=['Load Date', 'Disposal Site', 'CYD', 'Proportion', 'Assigned Trucks'])
 
+# Save the Output File "Truck Assignment.csv"
 truck_assignment_file_name = "Truck Assignment.csv"
 truck_assignment_full_path = os.path.join(output_base_dir, truck_assignment_file_name)
-disposal_summary.to_csv(truck_assignment_full_path, index=False)
+final_disposal_summary.to_csv(truck_assignment_full_path, index=False)
 
-# --- 2. Load focus_area_dms_node.csv ---
+# Merge with DMS Nodes and Export
+# Load the disposal site data from the CSV
 dms_nodes_file_name = "focus_area_dms_node.csv"
 dms_nodes_full_path = os.path.join(output_base_dir, dms_nodes_file_name)
 focus_area_dms_node_df = pd.read_csv(dms_nodes_full_path)
-print(f"Number of disposal sites in focus area: {len(focus_area_dms_node_df)}")
-print("\nOriginal focus_area_dms_node.csv head:")
-print(focus_area_dms_node_df.head())
 
 # Load the Truck Assignment data
 truck_assignment_df = pd.read_csv(truck_assignment_full_path)
 
-# Select only the necessary columns from truck_assignment_df for merging
-# We need 'Disposal Site' to match and 'Assigned Trucks' to bring in.
-truck_data_to_merge = truck_assignment_df[['Disposal Site', 'Assigned Trucks']]
+# Select and rename the necessary columns from truck_assignment_df for merging
+truck_data_to_merge = truck_assignment_df.rename(columns={'Assigned Trucks': 'Trucks', 'Load Date': 'Load Date'})
 
-# Perform a left merge to add 'Assigned Trucks' to focus_area_dms_node_df
-# 'how='left'' ensures all rows from focus_area_dms_node_df are kept.
-# If a 'Disposal Site' from focus_area_dms_node_df is not found in truck_assignment_df, the 'Trucks' column for that row will be NaN.
+# Perform a left merge to add 'Trucks' to focus_area_dms_node_df
 focus_area_dms_node_df = pd.merge(
     focus_area_dms_node_df,
     truck_data_to_merge,
-    on='Disposal Site',
+    on=['Disposal Site'],
     how='left'
 )
+# Ensure all dates from the full range are included
+focus_area_dms_node_df = pd.merge(all_dates_df, focus_area_dms_node_df, on='Load Date', how='left')
 
-# Rename 'Assigned Trucks' to 'Trucks' as per your requirement for the new column name
-focus_area_dms_node_df = focus_area_dms_node_df.rename(columns={'Assigned Trucks': 'Trucks'})
-
-
-# Fill any NaN values in the new 'Trucks' column with 0
-# This handles cases where a disposal site in the focus area might not have
-# corresponding truck assignment data in Truck Assignment.csv
+# Fill NaN values with 0
 focus_area_dms_node_df['Trucks'] = focus_area_dms_node_df['Trucks'].fillna(0).astype(int)
+focus_area_dms_node_df['CYD'] = focus_area_dms_node_df['CYD'].fillna(0)
 
-# print("\nUpdated focus_area_dms_node_df with 'Trucks' column:")
-print(focus_area_dms_node_df.head())
-
-# --- 4. Export the updated DataFrame ---
+# --- 5. Export the Updated DataFrame ---
 output_dms_file_name_with_trucks = "focus_area_dms_node_with_trucks.csv"
 full_output_dms_path_with_trucks = os.path.join(output_base_dir, output_dms_file_name_with_trucks)
 focus_area_dms_node_df.to_csv(full_output_dms_path_with_trucks, index=False)
-
-print(f"\nUpdated focus_area_dms_node_with_trucks.csv saved to: {full_output_dms_path_with_trucks}")
-
 ```
 
-
-
-```python
-# Load the Truck sheet from the Excel file
-truck_data = pd.read_excel(daily_path, sheet_name="Truck")
-
-# Define the coefficients of the polynomial in descending order of power
-# y = -5E-10x^6 + 4E-07x^5 - 0.0001x^4 + 0.0143x^3 - 1.0547x^2 + 35.076x - 157.04
-coefficients = [-5e-10, 4e-07, -0.0001, 0.0143, -1.0547, 35.076, -157.04]
-
-# Generate a random integer for x (time period) within the specified range [15, 64]
-random_x = random.randint(15, 64)
-
-# Calculate the value of y (number of haul_in trucks) using the polynomial equation
-# np.polyval evaluates the polynomial defined by 'coefficients' at the value 'random_x'.
-haul_in_trucks_float = np.polyval(coefficients, random_x)
-
-# Since 'y' represents the number of trucks, it should be a non-negative integer.
-# Round the result to the nearest integer and ensure it's not negative.
-haul_in_trucks = max(0, round(haul_in_trucks_float))
-
-print(f"Randomly selected time period (x): {random_x}")
-print(f"Calculated number of haul_in trucks (y): {haul_in_trucks}")
-
-# Save outputs to CSV file
-output_file_name = 'haul_in_trucks_value.txt'
-
-full_output_path = os.path.join(output_base_dir, output_file_name)
-
-with open(full_output_path, 'w') as f:
-        f.write(str(haul_in_trucks)) # Convert the number to a string before writing
-print(f"Successfully saved haul_in_trucks to: {full_output_path}")
-
-# foucs_area_fire_station_to_node.to_csv(full_output_path, index=False) # [c6]
-# print(f"Successfully saved data to: {full_output_path}")
-```
-
-## Trucks to DMS
-```python
-# --- 2. Load focus_area_dms_node.csv ---
-dms_nodes_file_name = "focus_area_dms_node.csv"
-dms_nodes_full_path = os.path.join(output_base_dir, dms_nodes_file_name)
-
-focus_area_dms_node_df = pd.read_csv(dms_nodes_full_path)
-
-num_disposal_sites = len(focus_area_dms_node_df)
-print(f"Number of disposal sites found: {num_disposal_sites}")
-
-# Calculate the base number of trucks each site receives
-base_trucks_per_site = math.ceil(haul_in_trucks / num_disposal_sites)
-print(f"base trucks: {base_trucks_per_site}")
-
-# Initialize the 'Trucks' column with the base number
-focus_area_dms_node_df['Trucks'] = base_trucks_per_site
-
-print("\nTrucks assigned to disposal sites:")
-print(focus_area_dms_node_df[['Disposal Site', 'Trucks']].head(num_disposal_sites))
-
-assigned_total = focus_area_dms_node_df['Trucks'].sum()
-print(f"\nTotal haul_in_trucks: {haul_in_trucks}")
-print(f"Total trucks assigned: {assigned_total}")
-
-# --- 4. Export the updated DataFrame ---
-output_dms_file_name = "focus_area_dms_node_with_trucks.csv"
-full_output_dms_path = os.path.join(output_base_dir, output_dms_file_name)
-focus_area_dms_node_df.to_csv(full_output_dms_path, index=False)
-```
-
-
-```python
-focus_area_piles_df['geometry'] = focus_area_piles_df.apply(lambda row: Point(row['Pile_Longi'], row['Pile_Latit']), axis=1) # [d3]
-
-focus_area_piles_gdf = gpd.GeoDataFrame(focus_area_piles_df, geometry='geometry', crs="EPSG:4326")
-
-# Assign a cubic yard volume value for each debris pile based on their type
-
-# Define categories of debris types for volume assignment
-debris_types_cd_related = ["C and D", "Compact CD", "Concrete", "Concrete to FDS", "Sand CD", "Residual Compact CD"]
-
-debris_types_vegetation_related = ["Vegetation", "Mulch", "Dirty Mulch", "Reuse Mulch"]
-
-debris_types_zero_volume = ["Clean Sand Soil", "Dirty Sand Soil", "HHW to DMS","E-Waste to FDS", "White Good to FDS", "Putrescent", "Dock Section"]
-
-
-# Function to assign random CYD based on type
-def assign_cyd_volume(debris_type):
-    if debris_type in debris_types_cd_related:
-        # For C&D related, assign random value from 1 to 100 CYD
-        # Source: This is an assumption based on common ranges for individual debris piles
-        # (not truck loads), reflecting variability in pile size.
-        # While precise external studies for individual pile volumes are scarce,
-        # this range balances small debris accumulations with larger, single-source debris piles.
-        # It's a stochastic approach to introduce variability.
-        return np.random.randint(1, 101) # Generates integers from 1 to 100 inclusive
-    elif debris_type in debris_types_vegetation_related:
-        # For Vegetation related, assign random value from 1 to 100 CYD
-        # Source: Similar rationale as C&D. Vegetation piles can vary from small brush to large treefall.
-        # This range accounts for that variability.
-        return np.random.randint(1, 101) # Generates integers from 1 to 100 inclusive
-    elif debris_type in debris_types_zero_volume:
-        # For sand/soil and specific hazardous/white goods/dock sections, assign 0 CYD.
-        # Source: This aligns with your explicit request and implicitly assumes
-        # these types are either negligible in volume for optimization, or are
-        # handled differently (e.g., individual item counts for white goods, or
-        # non-volumetric considerations for sand/soil in this context).
-        return 0
-    else:
-        # Handle any unexpected debris types
-        print(f"Warning: Unknown debris type '{debris_type}'. Assigning 0 CYD.")
-        return 0
-
-
-# Apply the function to create the 'CYD' column in the GeoDataFrame
-focus_area_piles_gdf['CYD'] = focus_area_piles_gdf['fldDebrisC'].apply(assign_cyd_volume)
-# print("CYD volumes assigned. Sample with CYD:")
-# print(focus_area_piles_gdf[['fldDebrisC', 'CYD']].head())
-
-
-# --- Step 3: Find nearest nodes for debris locations ---
-# Use 'osmid_node' as a suffix to distinguish from any 'osmid' in focus_area_piles_gdf if it existed
-
-focus_area_piles_to_node = gpd.sjoin_nearest(focus_area_piles_gdf, focus_area_nodes_gdf, how="left", distance_col="distance_to_node")
-
-
-# --- Step 4: Sum the "CYD" values for each node ---
-# Group by the node's original OSM ID (now 'osmid_node' in the joined DataFrame)
-cyd_sum_per_node = focus_area_piles_to_node.groupby('index_right')['CYD'].sum()
-# print("Summed CYD per node (sample):")
-# print(cyd_sum_per_node.head())
-
-# Map the calculated sums back to the original focus_area_nodes_gdf
-# .fillna(0) ensures nodes with no associated debris piles get a 'total_CYD' of 0.
-# focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf['osmid'].map(cyd_sum_per_node).fillna(0)
-focus_area_nodes_gdf['total_CYD'] = focus_area_nodes_gdf.index.map(cyd_sum_per_node).fillna(0) # [g5]
-
-# print("focus_area_nodes_gdf updated with 'total_CYD'. Sample:")
-# print(focus_area_nodes_gdf[['osmid', 'total_CYD']].head())
-
-output_file_name = "focus_area_NodalLoads.csv"
-full_output_path = os.path.join(output_base_dir, output_file_name)
-
-focus_area_nodes_gdf[['osmid', 'x', 'y', 'total_CYD']].to_csv(full_output_path, index=False)
-
-```
-
-
-[d1]
-- pd.to_datetime(): Converts values in the 'Load Date' column of the focus_area_piles_df DataFrame into datetime objects.
-
-[d2]
-- focus_area_piles_df[...]: Uses the boolean Series to index the focus_area_piles_df DataFrame. 
-    - Only the rows where the boolean Series is True (meaning the 'Load Date' matches the target_date) are kept in the updated focus_area_piles_df DataFrame.
-- .dt: Special accessor that allows access to datetime-like properties of a Series (a single column of a DataFrame).
-- .strftime('%m/%d/%Y'): Formats each datetime object in the 'Load Date' column into a string with the specific format 'month/day/year' (e.g., "10/19/2022"). 
-    - To ensure a direct string comparison with the target_date string.
-- == target_date: Compares the formatted date string from the 'Load Date' column with the target_date string. 
-    - This comparison results in a boolean Series (True for rows where the dates match, False otherwise).
-
-[d3] 
-- Similar to before except for debris data
-
-[d4]
-- cyd_sum_per_node: The result is a pandas Series where the index is the unique values from the 'index_right' column (representing node indices) and the values are the total sum of 'CYD' for each of those nodes.
-- .groupby('index_right'): This groups the rows in focus_area_loads_to_node based on the values in the column named 'index_right'. 
-    - 'index_right' contains the index values from your focus_area_nodes_gdf, effectively linking each debris load to a specific node in your network
-- ['CYD']: After grouping, this selects the 'CYD' column for each group. This column likely contains the amount of debris for each load.
-- .sum(): This calculates the sum of the 'CYD' values for all the rows within each group (i.e., for all debris loads associated with the same node)
-[d5]
-- focus_area_nodes_gdf.index: This accesses the index of the focus_area_nodes_gdf. It's assumed that the index of this GeoDataFrame corresponds to the 'index_right' values used in the groupby() operation.
-
-{{< pagebreak >}}
-
-## Raster Image
-
-```python
-def analyze_debris_tif(tif_path):
-    """
-    Analyzes a raster TIFF for debris pile pixel values (0, 1, 2) and
-    calculates the area for low and high density debris.
-
-    Args:
-        tif_path (str): The file path to the raster TIFF.
-
-    Returns:
-        dict: A dictionary containing the pixel counts and calculated areas
-              for 'low_density_debris' and 'high_density_debris'.
-              Returns None if the file cannot be opened.
-    """
-    try:
-        with rasterio.open(tif_path) as src:
-            # Read the raster data into a NumPy array
-            debris_data = src.read(1)  # Assuming debris data is in band 1
-
-            # Get the pixel resolution (width and height of a single pixel)
-            # transform.a is the pixel width (x resolution)
-            # transform.e is the pixel height (y resolution), typically negative
-            pixel_width = src.transform.a
-            pixel_height = abs(src.transform.e) # Use absolute value for height
-
-            # Calculate the area of a single pixel
-            pixel_area = pixel_width * pixel_height
-
-            # Count pixels for each debris density
-            # Using boolean indexing for efficient counting
-            low_density_pixels = np.sum(debris_data == 1)
-            high_density_pixels = np.sum(debris_data == 2)
-
-            # Calculate the area for each debris density
-            low_density_area = low_density_pixels * pixel_area
-            high_density_area = high_density_pixels * pixel_area
-
-            results = {
-                'low_density_pixels': low_density_pixels,
-                'low_density_area': low_density_area,
-                'high_density_pixels': high_density_pixels,
-                'high_density_area': high_density_area
-            }
-            return results
-
-    except rasterio.errors.RasterioIOError as e:
-        print(f"Error opening or reading TIFF file: {e}")
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return None
-
-# Example Usage:
-if __name__ == "__main__":
-    # Create a dummy TIFF for demonstration purposes
-    # In a real scenario, you would have your actual 'debris_piles.tif'
-    from rasterio.transform import from_origin
-
-    # Define a simple 3x3 array representing your debris data
-    # 0: no debris, 1: low density, 2: high density
-    dummy_data = np.array([
-        [0, 1, 2],
-        [1, 0, 1],
-        [2, 1, 0]
-    ], dtype=rasterio.uint8) # Use an appropriate data type
-
-    # Define metadata for the dummy TIFF
-    # Assuming a resolution of 10x10 units (e.g., meters)
-    transform = from_origin(0, 30, 10, 10) # (west, north, pixel_width, pixel_height)
-    new_tif_path = "debris_piles_dummy.tif"
-
-    with rasterio.open(
-        new_tif_path,
-        'w',
-        driver='GTiff',
-        height=dummy_data.shape[0],
-        width=dummy_data.shape[1],
-        count=1,
-        dtype=dummy_data.dtype,
-        crs='EPSG:3857', # Example CRS (Web Mercator), adjust to your data's CRS
-        transform=transform,
-    ) as dst:
-        dst.write(dummy_data, 1)
-
-    print(f"Dummy TIFF created at: {new_tif_path}")
-
-    # Analyze the dummy TIFF
-    analysis_results = analyze_debris_tif(new_tif_path)
-
-    if analysis_results:
-        print("\nAnalysis Results:")
-        print(f"Low Density Debris Pixels: {analysis_results['low_density_pixels']}")
-        print(f"Low Density Debris Area: {analysis_results['low_density_area']:.2f} square units")
-        print(f"High Density Debris Pixels: {analysis_results['high_density_pixels']}")
-        print(f"High Density Debris Area: {analysis_results['high_density_area']:.2f} square units")
-```
-
-Explanation:
-
-rasterio.open(tif_path) as src:: This opens the TIFF file. The with statement ensures the file is properly closed afterwards. src is a DatasetReader object that provides access to the raster's properties and data.
-
-src.read(1): Reads the data from the first band (index 1) of the raster into a NumPy array. If your TIFF has multiple bands and the debris data is in a different band, change the 1 to the appropriate band number.
-
-src.transform.a and abs(src.transform.e): These access the affine transformation matrix of the raster.
-
-src.transform.a gives the width of a pixel in the x-direction (horizontal resolution).
-
-src.transform.e gives the height of a pixel in the y-direction (vertical resolution). It's often negative because the origin of the raster grid is typically at the top-left, and y-coordinates increase downwards in image arrays. Taking the abs() ensures you get a positive height value.
-
-pixel_area = pixel_width * pixel_height: Calculates the area covered by a single pixel. The units of this area will be the square of the units of your raster's Coordinate Reference System (CRS). For example, if your CRS is in meters, the area will be in square meters.
-
-np.sum(debris_data == 1) and np.sum(debris_data == 2): These lines use boolean indexing with NumPy.
-
-debris_data == 1 creates a boolean array where True indicates pixels with a value of 1 (low density).
-
-np.sum() then counts the number of True values in this boolean array, effectively giving you the pixel count for that specific debris density.
-
-This approach is efficient and robust for handling raster data in Python. Make sure your raster TIFF has a defined Coordinate Reference System (CRS) so that the pixel dimensions (pixel_width and pixel_height) are in meaningful spatial units (e.g., meters, feet) for accurate area calculations.
-
+## Raster Debris Data
+Description
+- Get and assign haul-in trucks to each DMS for each date
+Note
+- !!!Assumptions on debris heights!!!
+- !!!Check 380417 CYD!!!
 ```{python}
 try:
     with rasterio.open(raster_path) as src:
@@ -840,18 +585,16 @@ try:
         print(f"CRS object: {raster_crs}")
         print(f"Type of CRS object: {type(raster_crs)}")
 
-        # --- Common ways to interpret and use the CRS information ---
+        # Extract the CRS information
 
-        # 1. Check if CRS exists (it might be None for unreferenced rasters)
+        # 1. Check if CRS exists
         if raster_crs:
             print("\nCRS Details:")
 
-            # 2. Get the CRS in PROJ4 string format (a widely used text format)
-            # This is often what you see when printing the CRS object directly.
+            # 2. Get the CRS in PROJ4 string format
             print(f"PROJ4 string: {raster_crs.to_proj4()}")
 
-            # 3. Get the EPSG code (if available and unambiguous)
-            # EPSG codes are numerical identifiers for CRSs (e.g., EPSG:4326 for WGS84 Lat/Lon)
+            # 3. Get the EPSG code
             if raster_crs.to_epsg():
                 print(f"EPSG code: EPSG:{raster_crs.to_epsg()}")
             else:
@@ -860,17 +603,16 @@ try:
             # 4. Check if it's a geographic (latitude/longitude) CRS
             print(f"Is geographic CRS? {raster_crs.is_geographic}")
 
-            # 5. Check if it's a projected CRS (e.g., UTM, State Plane - uses meters or feet)
+            # 5. Check if it's a projected CRS (uses meters or feet)
             print(f"Is projected CRS? {raster_crs.is_projected}")
 
             # 6. Get the linear units (e.g., 'meter', 'foot', 'degree')
-            # This is crucial for understanding what units your pixel dimensions (src.transform.a, src.transform.e) are in.
             if raster_crs.linear_units:
                 print(f"Linear Units: {raster_crs.linear_units}")
             else:
                 print("Linear units not directly available (might be a geographic CRS in degrees).")
 
-            # 7. Get the WKT (Well-Known Text) representation (more verbose, but comprehensive)
+            # 7. Get the WKT (Well-Known Text) representation
             print(f"WKT: {raster_crs.to_wkt()}")
 
         else:
@@ -881,6 +623,18 @@ except rasterio.errors.RasterioIOError as e:
 except Exception as e:
     print(f"An unexpected error occurred: {e}")
 ```
+
+Output:
+    CRS object: EPSG:4326
+    Type of CRS object: <class 'rasterio.crs.CRS'>
+
+    CRS Details:
+    PROJ4 string: +proj=longlat +datum=WGS84 +no_defs=True
+    EPSG code: EPSG:4326
+    Is geographic CRS? True
+    Is projected CRS? False
+    Linear Units: unknown
+    WKT: GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]
 
 CRS object: CRS({'init': 'epsg:32615'}) (or similar):
 - This is the basic string representation of the rasterio.crs.CRS object.
@@ -896,8 +650,6 @@ print("GeoDataFrame for nodes created/verified.")
 ```
 
 ```{python}
-# --- Function 1: Calculate Debris Volume from Raster ---
-
 def calculate_debris_volume_from_raster(raster_file_path):
     """
     Reads a raster file, reprojects it, calculates debris volume for each non-zero pixel,
@@ -915,8 +667,8 @@ def calculate_debris_volume_from_raster(raster_file_path):
     # Conversion factors: 1 meter = 1.09361 yards, 1 sq meter = (1.09361)^2 sq yards
     debris_height_map_yards = {
         0: 0.0, # No debris
-        1: 0.55, # Low density: Assume average height of 0.55 yards (approx 0.5 meters)
-        2: 1.65  # High density: Assume average height of 1.65 yards (approx 1.5 meters)
+        1: 0.66, # Low density: Assume average height of 0.55 yards (approx 0.5 meters)
+        2: 1.98  # High density: Assume average height of 1.65 yards (approx 1.5 meters)
     }
 
     # Target Projected CRS for accurate area calculation (UTM Zone 17N for Florida)
@@ -932,6 +684,10 @@ def calculate_debris_volume_from_raster(raster_file_path):
             print(f"  Raster Bounds: {src.bounds}")
             print(f"  Raster Dimensions: {src.width}x{src.height}")
             print(f"  Raster Transform: {src.transform}")
+            # Corrected diagnostic prints:
+            print(f"  src.dtypes: {src.dtypes}") # Use .dtypes as suggested by error
+            print(f"  src.profile['dtype']: {src.profile['dtype']}") # This is the robust way to get dtype
+
 
             reprojected_data = None
             reprojected_transform = None
@@ -948,7 +704,9 @@ def calculate_debris_volume_from_raster(raster_file_path):
                     src.crs, target_crs, src.width, src.height, *src.bounds
                 )
 
-                reprojected_data = np.empty((dst_height, dst_width), dtype=src.dtype)
+                # This line was already correctly using src.profile['dtype'] in the last version,
+                # so the problem was only in the print statement
+                reprojected_data = np.empty((dst_height, dst_width), dtype=src.profile['dtype'])
 
                 reproject(
                     source=rasterio.band(src, 1), # Read band 1
@@ -978,8 +736,11 @@ def calculate_debris_volume_from_raster(raster_file_path):
             print(f"  Iterating through {rows*cols} pixels to identify debris...")
             
             # Find indices where density is not 0 (or nodata)
+            # Ensure src.nodata is correctly handled; it might be None if not explicitly set
+            nodata_value = src.nodata if src.nodata is not None else 0 # Assume 0 is nodata if not explicitly set
+
             debris_row_indices, debris_col_indices = np.where(
-                (reprojected_data > 0) & (reprojected_data != src.nodata) # Exclude 0 and any explicit nodata value
+                (reprojected_data > 0) & (reprojected_data != nodata_value) # Exclude 0 and any explicit nodata value
             )
             
             for r, c in zip(debris_row_indices, debris_col_indices):
@@ -1003,15 +764,11 @@ def calculate_debris_volume_from_raster(raster_file_path):
         return []
     except Exception as e:
         print(f"An unexpected error occurred during raster processing: {e}")
+        traceback.print_exc() # This will print the detailed traceback
         return []
 ```
 
-
 ```{python}
-
-
-# --- Function 2: Map Debris Pixels to Nearest Node using KD-Tree ---
-
 def map_debris_to_nodes_kdtree(debris_pixels_data, nodes_gdf):
     """
     Maps debris pixels to the nearest network node using a KD-tree and aggregates
@@ -1080,7 +837,7 @@ def map_debris_to_nodes_kdtree(debris_pixels_data, nodes_gdf):
     # Update the main node_debris_volume_series
     node_debris_volume_series.update(aggregated_volumes)
     
-    print("  Mapping complete.")
+    print("Mapping complete.")
 
     # Convert aggregated results to DataFrame, keeping only nodes with non-zero debris
     results_df = node_debris_volume_series[node_debris_volume_series > 0].reset_index()
@@ -1092,8 +849,9 @@ def map_debris_to_nodes_kdtree(debris_pixels_data, nodes_gdf):
     print(f"  Aggregated debris for {len(results_df)} nodes.")
     return results_df
 
-# --- Main Execution Flow ---
+```
 
+```{python}
 # 1. Calculate debris volume from raster pixels
 all_debris_pixels_with_volume = calculate_debris_volume_from_raster(raster_path)
 
@@ -1108,27 +866,19 @@ if all_debris_pixels_with_volume:
     # Ensure 'osmid' is string in focus_area_NodalLoads_df for merging consistency
     focus_area_NodalLoads_df['osmid'] = focus_area_NodalLoads_df['osmid'].astype(str)
 
-    # Create a new column in focus_area_NodalLoads_df to hold the raster-derived debris.
-    # We will use 'how='left'' merge to keep all existing nodes and add the new debris data.
-    # Nodes not found in nodal_debris_volumes_df will have NaN, which we'll fill with 0.
-    
     # Merge the new debris volumes into focus_area_NodalLoads_df
     focus_area_NodalLoads_df = focus_area_NodalLoads_df.merge(
         nodal_debris_volumes_df, on='osmid', how='left', suffixes=('_existing', '_raster')
     )
 
-    # Decide how to integrate:
-    # Option A: Add raster debris to existing 'total_CYD' (if it represents cumulative debris)
-    # focus_area_NodalLoads_df['total_CYD'] = focus_area_NodalLoads_df['total_CYD_existing'].fillna(0) + focus_area_NodalLoads_df['total_debris_cyd'].fillna(0)
-
-    # Option B: Replace 'total_CYD' with raster-derived debris (if raster is the definitive source)
-    # Fill NaN from the merged column with 0, as nodes without raster debris should have 0 added.
+    # Update 'total_CYD' with the raster-derived values.
+    # We create a temporary column to store the raster debris, handling NaN values (nodes without raster debris).
     focus_area_NodalLoads_df['total_CYD_raster_source'] = focus_area_NodalLoads_df['total_debris_cyd'].fillna(0)
     
-    # If 'total_CYD' in focus_area_NodalLoads_df should now reflect *only* the raster data:
+    # If the goal is for 'total_CYD' to *only* reflect the raster-derived debris:
     focus_area_NodalLoads_df['total_CYD'] = focus_area_NodalLoads_df['total_CYD_raster_source']
     
-    # Clean up the merged columns
+    # Clean up the intermediate columns created during the merge
     focus_area_NodalLoads_df.drop(columns=['total_CYD_existing', 'total_debris_cyd', 'total_CYD_raster_source'], inplace=True, errors='ignore')
 
     print(f"focus_area_NodalLoads_df updated with raster-derived debris volumes. New shape: {focus_area_NodalLoads_df.shape}")
@@ -1141,5 +891,134 @@ if all_debris_pixels_with_volume:
 
 else:
     print("No debris volumes calculated from raster. Nodal loads not updated from raster.")
-
 ```
+
+```{python}
+# Load nodal loads of focus area
+focus_area_NodalLoads_from_Raster_path = os.path.join(output_base_dir, 'focus_area_NodalLoads_from_Raster.csv')
+
+focus_area_NodalLoads_from_Raster_df = pd.read_csv(focus_area_NodalLoads_from_Raster_path)
+
+# Convert nodal loads data to GeoDataFrames
+focus_area_NodalLoads_from_Raster_df['geometry'] = focus_area_NodalLoads_from_Raster_df.apply(lambda row: Point(row['x'], row['y']), axis=1)
+
+focus_area_NodalLoads_from_Raster_gdf = gpd.GeoDataFrame(focus_area_NodalLoads_from_Raster_df, geometry='geometry', crs="EPSG:4326")
+
+print(focus_area_NodalLoads_from_Raster_gdf.head())
+
+# Create a dictionary mapping each node to its total_CYD
+node_cyd_dict = focus_area_NodalLoads_from_Raster_df.set_index('osmid')['total_CYD'].to_dict()
+
+# Count edges connected to each node (both u and v)
+
+# First, count connections for 'u' nodes
+u_edge_counts = focus_area_edges_df['u'].value_counts()
+print(u_edge_counts)
+
+# Count connections for 'v' nodes and add to u_edge_counts
+edge_counts = u_edge_counts.add(focus_area_edges_df['v'].value_counts(), fill_value=0)
+print(edge_counts)
+
+# Convert edge_counts to a dictionary
+edge_counts_dict = edge_counts.to_dict()
+
+# Calculate load split for each edge
+# Define a function to get the load per edge based on u and v nodes
+def calculate_edge_load(row):
+    u, v = row['u'], row['v']
+    
+    # Get the total_CYD for each node, or assugb 0 if the node has no associated debris data
+    u_cyd = node_cyd_dict.get(u, 0)
+    v_cyd = node_cyd_dict.get(v, 0)
+    
+    # Get the number of edges connected to each node
+    u_edge_count = edge_counts_dict.get(u, 1)  # Default to 1 to avoid division by zero
+    v_edge_count = edge_counts_dict.get(v, 1)
+    
+    # Calculate load contribution from each node to this edge
+    u_contribution = u_cyd / u_edge_count if u_edge_count > 0 else 0
+    v_contribution = v_cyd / v_edge_count if v_edge_count > 0 else 0
+    
+    # Total load for the edge is the sum of contributions from u and v nodes
+    return u_contribution + v_contribution
+
+# Apply the function to each edge
+focus_area_edges_df['split_CYD'] = focus_area_edges_df.apply(calculate_edge_load, axis=1)
+
+output_file_name = "focus_area_EdgeLoads_from_Raster.csv"
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+# Select only the relevant columns and export to a new CSV
+focus_area_edges_df[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'split_CYD']].to_csv(full_output_path, index=False)
+
+# Load the edge loads data
+focus_area_EdgeLoads_from_Raster_path = os.path.join(output_base_dir, 'focus_area_EdgeLoads_from_Raster.csv')
+
+focus_area_EdgeLoads_from_Raster_df = pd.read_csv(focus_area_EdgeLoads_from_Raster_path)
+
+# Sort each pair of nodes in u and v, so that (u, v) and (v, u) appear consistently as (min, max)
+focus_area_EdgeLoads_from_Raster_df['node_pair'] = focus_area_EdgeLoads_from_Raster_df.apply(lambda row: tuple(sorted((row['u'], row['v']))), axis=1)
+
+# Keep the first osmid and the relevant columns of the first excel
+combined_edges = focus_area_EdgeLoads_from_Raster_df.groupby('node_pair').agg({
+    'osmid': 'first', 'u': 'first', 'v': 'first', 'name': 'first', 'WKT': 'first', 'fid': 'first', 'highway': 'first', 'oneway': 'first', 'reversed': 'first', 'length': 'first', 'lanes': 'first', 'ref': 'first', 'access': 'first', 'service': 'first', 'maxspeed': 'first', 'bridge': 'first', 'junction': 'first', 'tunnel': 'first', 'area': 'first', 'width': 'first', 'split_CYD': 'sum'         
+}).reset_index(drop=True)
+
+# Rename columns for excel
+combined_edges = combined_edges.rename(columns={'split_CYD': 'total_split_CYD'})
+
+output_file_name = "focus_area_EdgeLoads_from_Raster_Combined.csv"
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+# Select only the relevant columns and export to a new CSV
+combined_edges[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'total_split_CYD']].to_csv(full_output_path, index=False)
+```
+
+Sum Output: 
+- 379928.1292. close to the intended target of 380417
+
+If your Raster Data.tif is already a classification of debris (values 0, 1, 2 representing no debris, low debris, high debris), then SegFormer is not needed for the debris identification step itself. Your raster is the debris identification.
+
+Methodology to Determine Roadway Obstructions:
+
+The methodology involves several steps, combining geospatial data processing (vector and raster) with pixel-level analysis to apply your specific blockage criteria.
+
+    1. Data Preparation and Projection:
+
+        Road Network Data: Load your road centerline data (e.g., from OpenStreetMap) into a geopandas.GeoDataFrame. It's crucial that this data represents the road segments accurately. Assume its initial Coordinate Reference System (CRS) is WGS84 (EPSG:4326).
+
+        Debris Raster Data: Load your Raster Data.tif. This raster should contain pixel values indicating debris presence (e.g., 0 for no debris, 1 or 2 for debris).
+
+        Project to a Common CRS: Both the road network and the debris raster must be in the same projected CRS (e.g., a UTM zone like EPSG:26917 for Florida, where units are meters). This is essential for accurate buffering (10 meters) and pixel-to-meter conversions.
+
+    2. Create Road Buffers:
+
+        For each road segment in your projected GeoDataFrame, create a 10-meter buffer. This will generate polygons representing the 10m buffer area around each road centerline.
+
+    3. Analyze Debris within Buffers (Pixel-based Blockage Criteria):
+
+        This is the core of determining "whether or not a road is blocked" based on your definition: "debris that cover the entire width of a road buffer... while partial coverages will be ignored."
+
+            Iterate Through Road Segments: Process each road segment and its corresponding 10-meter buffer individually.
+
+            Mask Debris Raster to Buffer: For each road_buffer polygon, use rasterio.mask or equivalent techniques to extract only the debris pixel data that falls precisely within that buffer. This results in a masked array where pixels outside the buffer are set to a nodata value.
+
+            Define Blockage Criteria: To quantify "entire width coverage" and "partial coverages will be ignored," we use two main criteria:
+                Debris Coverage Ratio: Calculate the percentage of pixels within the road_buffer that are classified as "debris." This filters out roads with only minor debris. A coverage_threshold (e.g., 60%) is set.
+
+                Cross-Sectional Span Check (for "Entire Width"): This is the more sophisticated part.
+
+                    Within the masked debris array for the buffer, identify rows and columns that are entirely filled with debris pixels (meaning, every pixel within that row/column that falls inside the road_buffer polygon is debris).
+
+                    Calculate the proportion of such fully-covered rows and columns relative to the total number of rows/columns that contain any part of the buffer.
+
+                    A span_threshold (e.g., 80%) is applied. If a high percentage of both the row-wise and column-wise "slices" within the buffer are completely covered by debris, it strongly indicates that the debris spans the "entire width" of the road for a significant portion of its length.
+
+            Assign Blockage Status: If both the coverage_ratio and the row_span_ratio and col_span_ratio meet their respective thresholds, the road segment is marked as is_blocked = True.
+
+    4. Output Results:
+
+        Create a new GeoDataFrame that includes the original road network attributes and an additional boolean column (is_blocked) indicating whether each road segment is blocked or not.
+
+        Save this GeoDataFrame as a Shapefile, which can then be visualized in GIS software to see the blocked road segments.
+

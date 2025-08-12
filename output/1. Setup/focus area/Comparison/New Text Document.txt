@@ -1,0 +1,1 @@
+This file shows the first nodal loads from load data (trucks)

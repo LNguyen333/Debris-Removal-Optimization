@@ -1,0 +1,782 @@
+---
+title: "Debris Removal Process Setup Nodes and Edges"
+author: "Leanh Nguyen (Ln14)"
+
+date: 2025-03-27
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+  jupyter: python3
+---
+
+{{< pagebreak >}}
+
+# Setting Up Data
+
+Notes:
+- os.chdir(): changes the current working directory to a specific path
+- os.getcwd(): gets current working directory
+
+```{python}
+# Import libraries
+import pulp
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+import random
+import math
+import rasterio
+import osmnx as ox
+import os
+import traceback
+from rasterio.enums import Resampling
+from rasterio.warp import calculate_default_transform, reproject
+from shapely import wkt
+from shapely.geometry import Point, LineString
+from scipy.spatial import KDTree
+
+# Check the current working directory
+print("Current Working Directory:", os.getcwd())
+
+# Set the working directory to the project root if necessary
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+
+# Get the directory where current Python script is located. This makes paths relative to the project's root
+script_directory = os.path.dirname(__file__)
+
+# Construct the path to 'input' folder relative to the script. Assumes 'input' folder is in the same (sub-)directory as script
+Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
+OSM_path = os.path.join(script_directory, 'input', 'OSM')
+QGIS_path = os.path.join(script_directory, 'input', 'QGIS')
+focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area') # Change file here for different focus area
+
+output_base_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area') # Change file here for different focus area
+```
+
+## Lee County
+
+```{python}
+# Load Thompson's daily debris activity report of Crowder Gulf during Hurricane Ian
+daily_path = os.path.join(Lee_County_path, 'Lee_Country_Daily_Report.xlsx')
+
+# Load debris load locations for entire Lee County
+load_path = os.path.join(Lee_County_path, 'Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv')
+load_path_df = pd.read_csv(load_path)
+
+# Load debris pile data for entire Lee County
+debris_path = os.path.join(Lee_County_path, 'piles_30oct2023a.csv')
+
+# Load DMS locations from Lee County's Hurricane Support Map
+DMS_path = os.path.join(Lee_County_path, 'DMS.csv')
+
+# Load fire station locations from Lee County's Hurricane Support Map
+fire_station_path = os.path.join(Lee_County_path, 'fire_station.csv')
+```
+
+## QGIS
+
+```{python}
+# Load filtered nodes and edges files
+nodes_path = os.path.join(QGIS_path, 'Network_nodes_filtered.csv')
+edges_path = os.path.join(QGIS_path, 'Network_edges_filtered.csv')
+nodes_df = pd.read_csv(nodes_path)
+edges_df = pd.read_csv(edges_path)
+
+# Load filtered (critical) nodes, edges, and debris piles of chosen focus area
+focus_area_nodes_path = os.path.join(focus_area_path, 'focus_area_nodes.csv')
+focus_area_edges_path = os.path.join(focus_area_path, 'focus_area_edges.csv')
+focus_area_piles_path = os.path.join(focus_area_path, 'focus_area_piles.csv')
+focus_area_loads_path = os.path.join(focus_area_path, 'focus_area_loads.csv')
+focus_area_fire_station_path = os.path.join(focus_area_path, 'focus_area_fire_station.csv')
+focus_area_dms_path = os.path.join(focus_area_path, 'focus_area_dms.csv')
+focus_area_hospital_path = os.path.join(focus_area_path, 'focus_area_hospital.csv')
+focus_area_fuel_site_path = os.path.join(focus_area_path, 'focus_area_fuel_site.csv')
+
+focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
+focus_area_edges_df = pd.read_csv(focus_area_edges_path)
+focus_area_piles_df = pd.read_csv(focus_area_piles_path)
+focus_area_loads_df = pd.read_csv(focus_area_loads_path)
+focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
+focus_area_dms_df = pd.read_csv(focus_area_dms_path)
+focus_area_hospital_df = pd.read_csv(focus_area_hospital_path)
+focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
+
+# Load raster file for focus area
+raster_path = os.path.join(focus_area_path, 'Raster Data.tif')
+
+```
+
+{{< pagebreak >}}
+
+```{python}
+try:
+    with rasterio.open(raster_path) as src:
+        # Access the CRS object
+        raster_crs = src.crs
+
+        print(f"CRS object: {raster_crs}")
+        print(f"Type of CRS object: {type(raster_crs)}")
+
+        # --- Common ways to interpret and use the CRS information ---
+
+        # 1. Check if CRS exists (it might be None for unreferenced rasters)
+        if raster_crs:
+            print("\nCRS Details:")
+
+            # 2. Get the CRS in PROJ4 string format (a widely used text format)
+            # This is often what you see when printing the CRS object directly.
+            print(f"PROJ4 string: {raster_crs.to_proj4()}")
+
+            # 3. Get the EPSG code (if available and unambiguous)
+            # EPSG codes are numerical identifiers for CRSs (e.g., EPSG:4326 for WGS84 Lat/Lon)
+            if raster_crs.to_epsg():
+                print(f"EPSG code: EPSG:{raster_crs.to_epsg()}")
+            else:
+                print("No unambiguous EPSG code found for this CRS.")
+
+            # 4. Check if it's a geographic (latitude/longitude) CRS
+            print(f"Is geographic CRS? {raster_crs.is_geographic}")
+
+            # 5. Check if it's a projected CRS (e.g., UTM, State Plane - uses meters or feet)
+            print(f"Is projected CRS? {raster_crs.is_projected}")
+
+            # 6. Get the linear units (e.g., 'meter', 'foot', 'degree')
+            # This is crucial for understanding what units your pixel dimensions (src.transform.a, src.transform.e) are in.
+            if raster_crs.linear_units:
+                print(f"Linear Units: {raster_crs.linear_units}")
+            else:
+                print("Linear units not directly available (might be a geographic CRS in degrees).")
+
+            # 7. Get the WKT (Well-Known Text) representation (more verbose, but comprehensive)
+            print(f"WKT: {raster_crs.to_wkt()}")
+
+        else:
+            print("Raster file does not have a defined CRS.")
+
+except rasterio.errors.RasterioIOError as e:
+    print(f"Error opening or reading raster file: {e}")
+except Exception as e:
+    print(f"An unexpected error occurred: {e}")
+```
+
+CRS object: CRS({'init': 'epsg:32615'}) (or similar):
+- This is the basic string representation of the rasterio.crs.CRS object.
+- 'epsg:32615' is an example of an EPSG code. In this case, 32615 refers to WGS 84 / UTM Zone 15N, which uses meters as its linear unit.
+
+```{python}
+# Ensure focus_area_nodes_df has 'geometry' and is a GeoDataFrame as specified by user
+if 'geometry' not in focus_area_nodes_df.columns:
+    focus_area_nodes_df['geometry'] = focus_area_nodes_df['WKT'].apply(wkt.loads)
+focus_area_nodes_gdf = gpd.GeoDataFrame(focus_area_nodes_df, geometry='geometry', crs="EPSG:4326")
+
+print("GeoDataFrame for nodes created/verified.")
+```
+
+
+```{python}
+def calculate_debris_volume_from_raster(raster_file_path):
+    """
+    Reads a raster file, reprojects it, calculates debris volume for each non-zero pixel,
+    and returns pixel centroids with their calculated volumes.
+
+    Args:
+        raster_file_path (str): Path to the input raster file (e.g., 'Raster Data.tif').
+
+    Returns:
+        list: A list of tuples (x_projected, y_projected, debris_volume_cyd) for pixels
+              with debris, or an empty list if an error occurs.
+    """
+    # Define assumed debris heights for different density levels in yards
+    # These are stochastic assumptions and should be adjusted based on expert knowledge
+    # Conversion factors: 1 meter = 1.09361 yards, 1 sq meter = (1.09361)^2 sq yards
+    debris_height_map_yards = {
+        0: 0.0, # No debris
+        1: 0.55, # Low density: Assume average height of 0.55 yards (approx 0.5 meters)
+        2: 1.65  # High density: Assume average height of 1.65 yards (approx 1.5 meters)
+    }
+
+    # Target Projected CRS for accurate area calculation (UTM Zone 17N for Florida)
+    # Units in meters. Area will be converted to square yards.
+    target_crs = 'EPSG:26917'
+
+    debris_pixels_data = []
+
+    try:
+        with rasterio.open(raster_file_path) as src:
+            print(f"\n--- Processing Raster: {os.path.basename(raster_file_path)} ---")
+            print(f"  Raster CRS: {src.crs}")
+            print(f"  Raster Bounds: {src.bounds}")
+            print(f"  Raster Dimensions: {src.width}x{src.height}")
+            print(f"  Raster Transform: {src.transform}")
+            # Corrected diagnostic prints:
+            print(f"  src.dtypes: {src.dtypes}") # Use .dtypes as suggested by error
+            print(f"  src.profile['dtype']: {src.profile['dtype']}") # This is the robust way to get dtype
+
+
+            reprojected_data = None
+            reprojected_transform = None
+
+            # Reproject if necessary
+            if src.crs == target_crs:
+                print(f"  Raster already in target CRS ({target_crs}). No reprojection needed for internal processing.")
+                reprojected_data = src.read(1)
+                reprojected_transform = src.transform
+            else:
+                print(f"  Reprojecting raster from {src.crs} to {target_crs} for accurate area calculation...")
+                # Calculate the transform and dimensions for the reprojected data
+                dst_transform, dst_width, dst_height = calculate_default_transform(
+                    src.crs, target_crs, src.width, src.height, *src.bounds
+                )
+
+                # This line was already correctly using src.profile['dtype'] in the last version,
+                # so the problem was only in the print statement
+                reprojected_data = np.empty((dst_height, dst_width), dtype=src.profile['dtype'])
+
+                reproject(
+                    source=rasterio.band(src, 1), # Read band 1
+                    destination=reprojected_data,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=target_crs,
+                    resampling=Resampling.nearest # Use nearest for categorical data (0,1,2)
+                )
+                reprojected_transform = dst_transform
+                print(f"  Reprojection complete. New dimensions: {dst_width}x{dst_height}")
+
+            # Calculate pixel area in target CRS units (meters)
+            pixel_width_m = abs(reprojected_transform.a) # x-resolution
+            pixel_height_m = abs(reprojected_transform.e) # y-resolution
+            pixel_area_sq_m = pixel_width_m * pixel_height_m
+            
+            # Convert pixel area from square meters to square yards
+            sq_m_to_sq_yd_factor = (1.09361)**2 # (1 meter in yards)^2
+            pixel_area_sq_yd = pixel_area_sq_m * sq_m_to_sq_yd_factor
+            print(f"  Reprojected Pixel Resolution: {pixel_width_m:.2f}m x {pixel_height_m:.2f}m")
+            print(f"  Pixel Area: {pixel_area_sq_m:.2f} sq meters ({pixel_area_sq_yd:.2f} sq yards)")
+
+            # Iterate through pixels with debris and calculate volume
+            rows, cols = reprojected_data.shape
+            print(f"  Iterating through {rows*cols} pixels to identify debris...")
+            
+            # Find indices where density is not 0 (or nodata)
+            # Ensure src.nodata is correctly handled; it might be None if not explicitly set
+            nodata_value = src.nodata if src.nodata is not None else 0 # Assume 0 is nodata if not explicitly set
+
+            debris_row_indices, debris_col_indices = np.where(
+                (reprojected_data > 0) & (reprojected_data != nodata_value) # Exclude 0 and any explicit nodata value
+            )
+            
+            for r, c in zip(debris_row_indices, debris_col_indices):
+                density_value = reprojected_data[r, c]
+
+                if density_value in debris_height_map_yards:
+                    # Calculate centroid of the pixel in the reprojected CRS
+                    x_proj, y_proj = rasterio.transform.xy(reprojected_transform, r, c)
+
+                    assumed_height_yd = debris_height_map_yards[density_value]
+                    debris_volume_cyd = pixel_area_sq_yd * assumed_height_yd
+
+                    if debris_volume_cyd > 0: # Only add if actual volume is non-zero
+                        debris_pixels_data.append((x_proj, y_proj, debris_volume_cyd))
+            
+            print(f"  Found {len(debris_pixels_data)} pixels with debris.")
+            return debris_pixels_data
+
+    except rasterio.errors.RasterioIOError as e:
+        print(f"Error opening or reading raster file: {e}")
+        return []
+    except Exception as e:
+        print(f"An unexpected error occurred during raster processing: {e}")
+        traceback.print_exc() # This will print the detailed traceback
+        return []
+```
+
+```{python}
+# --- Function 2: Map Debris Pixels to Nearest Node using KD-Tree ---
+
+def map_debris_to_nodes_kdtree(debris_pixels_data, nodes_gdf):
+    """
+    Maps debris pixels to the nearest network node using a KD-tree and aggregates
+    debris volume at each node.
+
+    Args:
+        debris_pixels_data (list): List of (x_proj, y_proj, debris_volume_cyd) tuples.
+                                   These coordinates are in the target projected CRS.
+        nodes_gdf (geopandas.GeoDataFrame): GeoDataFrame of network nodes (expected in EPSG:4326,
+                                           will be reprojected internally).
+
+    Returns:
+        pandas.DataFrame: A DataFrame with 'osmid' and 'total_debris_cyd' for nodes
+                          that received debris.
+    """
+    if not debris_pixels_data:
+        print("No debris pixels to map.")
+        return pd.DataFrame(columns=['osmid', 'total_debris_cyd'])
+
+    # Define the target projected CRS (must match the one used for raster reprojection)
+    target_crs = 'EPSG:26917'
+
+    # Reproject nodes_gdf to the target CRS for accurate distance calculations
+    if nodes_gdf.crs != target_crs:
+        print(f"  Reprojecting nodes GeoDataFrame from {nodes_gdf.crs} to {target_crs}...")
+        nodes_gdf_proj = nodes_gdf.to_crs(target_crs)
+    else:
+        nodes_gdf_proj = nodes_gdf
+    
+    # Extract coordinates and OSMIDs of nodes in the projected CRS
+    node_coords_proj = np.array([(p.x, p.y) for p in nodes_gdf_proj.geometry])
+    node_osmids = nodes_gdf_proj['osmid'].values
+
+    # Build KD-Tree from node coordinates
+    print(f"  Building KD-Tree for {len(node_osmids)} nodes...")
+    kdtree = KDTree(node_coords_proj)
+    print("  KD-Tree built.")
+
+    # Initialize a Series to aggregate debris volume per node, keyed by osmid
+    # This is more efficient than a dict for large number of nodes
+    node_debris_volume_series = pd.Series(0.0, index=node_osmids)
+
+    print(f"  Mapping {len(debris_pixels_data)} debris pixels to nearest nodes...")
+    
+    # Extract pixel coordinates and volumes into separate NumPy arrays for bulk processing
+    pixel_coords = np.array([(p[0], p[1]) for p in debris_pixels_data])
+    pixel_volumes = np.array([p[2] for p in debris_pixels_data])
+
+    # Query KD-tree for nearest neighbor for all pixels at once
+    # This is the most efficient way to use KDTree for many queries
+    distances, nearest_node_indices = kdtree.query(pixel_coords, k=1)
+
+    # Aggregate debris volume using pandas for efficiency
+    # Create a temporary DataFrame for aggregation
+    temp_df = pd.DataFrame({
+        'nearest_osmid_idx': nearest_node_indices,
+        'pixel_volume': pixel_volumes
+    })
+
+    # Map the indices back to original OSMIDs
+    temp_df['osmid'] = node_osmids[temp_df['nearest_osmid_idx']]
+
+    # Group by osmid and sum the pixel volumes
+    aggregated_volumes = temp_df.groupby('osmid')['pixel_volume'].sum()
+
+    # Update the main node_debris_volume_series
+    node_debris_volume_series.update(aggregated_volumes)
+    
+    print("  Mapping complete.")
+
+    # Convert aggregated results to DataFrame, keeping only nodes with non-zero debris
+    results_df = node_debris_volume_series[node_debris_volume_series > 0].reset_index()
+    results_df.columns = ['osmid', 'total_debris_cyd']
+    
+    # Ensure osmid is string to match graph node IDs
+    results_df['osmid'] = results_df['osmid'].astype(str)
+    
+    print(f"  Aggregated debris for {len(results_df)} nodes.")
+    return results_df
+
+```
+
+```{python}
+# --- Main Execution Flow ---
+
+# 1. Calculate debris volume from raster pixels
+all_debris_pixels_with_volume = calculate_debris_volume_from_raster(raster_path)
+```
+
+
+```{python}
+# 2. Map debris pixels to the nearest network nodes using KD-Tree
+if all_debris_pixels_with_volume:
+    print("\n--- Mapping Debris Pixels to Nodes ---")
+    nodal_debris_volumes_df = map_debris_to_nodes_kdtree(all_debris_pixels_with_volume, focus_area_nodes_gdf)
+
+    # 3. Update the focus_area_NodalLoads_df
+    print("\n--- Updating Nodal Debris Loads ---")
+    
+    # Ensure 'osmid' is string in focus_area_NodalLoads_df for merging consistency
+    focus_area_NodalLoads_df['osmid'] = focus_area_NodalLoads_df['osmid'].astype(str)
+
+    # Merge the new debris volumes into focus_area_NodalLoads_df
+    focus_area_NodalLoads_df = focus_area_NodalLoads_df.merge(
+        nodal_debris_volumes_df, on='osmid', how='left', suffixes=('_existing', '_raster')
+    )
+
+    # Update 'total_CYD' with the raster-derived values.
+    # We create a temporary column to store the raster debris, handling NaN values (nodes without raster debris).
+    focus_area_NodalLoads_df['total_CYD_raster_source'] = focus_area_NodalLoads_df['total_debris_cyd'].fillna(0)
+    
+    # If the goal is for 'total_CYD' to *only* reflect the raster-derived debris:
+    focus_area_NodalLoads_df['total_CYD'] = focus_area_NodalLoads_df['total_CYD_raster_source']
+    
+    # Clean up the intermediate columns created during the merge
+    focus_area_NodalLoads_df.drop(columns=['total_CYD_existing', 'total_debris_cyd', 'total_CYD_raster_source'], inplace=True, errors='ignore')
+
+    print(f"focus_area_NodalLoads_df updated with raster-derived debris volumes. New shape: {focus_area_NodalLoads_df.shape}")
+    print(f"Example of updated focus_area_NodalLoads_df with raster debris (showing top 5 nodes with debris):\n{focus_area_NodalLoads_df[focus_area_NodalLoads_df['total_CYD'] > 0].head()}")
+
+    # Save the updated NodalLoads_df for downstream use
+    updated_nodal_loads_path = os.path.join(output_base_dir, 'focus_area_NodalLoads_from_Raster.csv')
+    focus_area_NodalLoads_df.to_csv(updated_nodal_loads_path, index=False)
+    print(f"Updated nodal debris loads saved to: {updated_nodal_loads_path}")
+
+else:
+    print("No debris volumes calculated from raster. Nodal loads not updated from raster.")
+```
+
+```{python}
+# Load nodal loads of focus area
+focus_area_NodalLoads_from_Raster_path = os.path.join(output_base_dir, 'focus_area_NodalLoads_from_Raster.csv')
+
+focus_area_NodalLoads_from_Raster_df = pd.read_csv(focus_area_NodalLoads_from_Raster_path)
+
+# Convert nodal loads data to GeoDataFrames
+focus_area_NodalLoads_from_Raster_df['geometry'] = focus_area_NodalLoads_from_Raster_df.apply(lambda row: Point(row['x'], row['y']), axis=1)
+
+focus_area_NodalLoads_from_Raster_gdf = gpd.GeoDataFrame(focus_area_NodalLoads_from_Raster_df, geometry='geometry', crs="EPSG:4326")
+
+print(focus_area_NodalLoads_from_Raster_gdf.head())
+
+# Create a dictionary mapping each node to its total_CYD
+node_cyd_dict = focus_area_NodalLoads_from_Raster_df.set_index('osmid')['total_CYD'].to_dict()
+
+# Count edges connected to each node (both u and v)
+
+# First, count connections for 'u' nodes
+u_edge_counts = focus_area_edges_df['u'].value_counts()
+print(u_edge_counts)
+
+# Count connections for 'v' nodes and add to u_edge_counts
+edge_counts = u_edge_counts.add(focus_area_edges_df['v'].value_counts(), fill_value=0)
+print(edge_counts)
+
+# Convert edge_counts to a dictionary
+edge_counts_dict = edge_counts.to_dict()
+
+# Calculate load split for each edge
+# Define a function to get the load per edge based on u and v nodes
+def calculate_edge_load(row):
+    u, v = row['u'], row['v']
+    
+    # Get the total_CYD for each node, or assugb 0 if the node has no associated debris data
+    u_cyd = node_cyd_dict.get(u, 0)
+    v_cyd = node_cyd_dict.get(v, 0)
+    
+    # Get the number of edges connected to each node
+    u_edge_count = edge_counts_dict.get(u, 1)  # Default to 1 to avoid division by zero
+    v_edge_count = edge_counts_dict.get(v, 1)
+    
+    # Calculate load contribution from each node to this edge
+    u_contribution = u_cyd / u_edge_count if u_edge_count > 0 else 0
+    v_contribution = v_cyd / v_edge_count if v_edge_count > 0 else 0
+    
+    # Total load for the edge is the sum of contributions from u and v nodes
+    return u_contribution + v_contribution
+
+# Apply the function to each edge
+focus_area_edges_df['split_CYD'] = focus_area_edges_df.apply(calculate_edge_load, axis=1)
+
+output_file_name = "focus_area_EdgeLoads_from_Raster.csv"
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+# Select only the relevant columns and export to a new CSV
+focus_area_edges_df[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'split_CYD']].to_csv(full_output_path, index=False)
+
+
+```
+
+
+```{python}
+# Load the edge loads data
+focus_area_EdgeLoads_from_Raster_path = os.path.join(output_base_dir, 'focus_area_EdgeLoads_from_Raster.csv')
+
+focus_area_EdgeLoads_from_Raster_df = pd.read_csv(focus_area_EdgeLoads_from_Raster_path)
+
+# Sort each pair of nodes in u and v, so that (u, v) and (v, u) appear consistently as (min, max)
+focus_area_EdgeLoads_from_Raster_df['node_pair'] = focus_area_EdgeLoads_from_Raster_df.apply(lambda row: tuple(sorted((row['u'], row['v']))), axis=1)
+
+# Keep the first osmid and the relevant columns of the first excel
+combined_edges = focus_area_EdgeLoads_from_Raster_df.groupby('node_pair').agg({
+    'osmid': 'first', 'u': 'first', 'v': 'first', 'name': 'first', 'WKT': 'first', 'fid': 'first', 'highway': 'first', 'oneway': 'first', 'reversed': 'first', 'length': 'first', 'lanes': 'first', 'ref': 'first', 'access': 'first', 'service': 'first', 'maxspeed': 'first', 'bridge': 'first', 'junction': 'first', 'tunnel': 'first', 'area': 'first', 'width': 'first', 'split_CYD': 'sum'         
+}).reset_index(drop=True)
+
+# Rename columns for excel
+combined_edges = combined_edges.rename(columns={'split_CYD': 'total_split_CYD'})
+
+output_file_name = "focus_area_EdgeLoads_from_Raster_Combined.csv"
+full_output_path = os.path.join(output_base_dir, output_file_name)
+
+# Select only the relevant columns and export to a new CSV
+combined_edges[['WKT', 'fid', 'u', 'v', 'osmid', 'name', 'highway', 'oneway', 'reversed', 'length', 'lanes', 'ref', 'access', 'service', 'maxspeed', 'bridge', 'junction', 'tunnel', 'area', 'width', 'total_split_CYD']].to_csv(full_output_path, index=False)
+```
+
+
+
+
+
+
+
+
+
+```{python}
+# Function 2: map_debris_to_nodes_kdtree
+def map_debris_to_nodes_kdtree(debris_pixels_data, nodes_gdf):
+    """
+    Maps debris points (given as projected coordinates and volumes) to the nearest
+    network node using a KD-tree and aggregates debris volume at each node.
+
+    Args:
+        debris_pixels_data (list): List of (x_projected, y_projected, debris_volume_cyd) tuples
+                                   for each debris point. Coordinates MUST be in the target_crs.
+        nodes_gdf (geopandas.GeoDataFrame): GeoDataFrame of network nodes (expected in EPSG:4326,
+                                           will be reprojected internally).
+
+    Returns:
+        pandas.DataFrame: A DataFrame with 'osmid' and 'total_CYD' for nodes
+                          that received debris.
+    """
+    if not debris_pixels_data:
+        print("No debris points to map.")
+        return pd.DataFrame(columns=['osmid', 'total_CYD']) # Return with column names even if empty
+
+    target_crs = 'EPSG:26917'
+
+    if nodes_gdf.crs != target_crs:
+        nodes_gdf_proj = nodes_gdf.to_crs(target_crs)
+    else:
+        nodes_gdf_proj = nodes_gdf
+    
+    node_coords_proj = np.array([(p.x, p.y) for p in nodes_gdf_proj.geometry])
+    node_osmids = nodes_gdf_proj['osmid'].values
+
+    kdtree = KDTree(node_coords_proj)
+    print(f"  Building KD-Tree for {len(node_osmids)} nodes.")
+
+    node_debris_volume_series = pd.Series(0.0, index=node_osmids)
+
+    print(f"  Mapping {len(debris_pixels_data)} debris items to nearest nodes...")
+    
+    debris_coords = np.array([(p[0], p[1]) for p in debris_pixels_data])
+    debris_volumes = np.array([p[2] for p in debris_pixels_data])
+
+    distances, nearest_node_indices = kdtree.query(debris_coords, k=1)
+
+    temp_df = pd.DataFrame({
+        'nearest_osmid_idx': nearest_node_indices,
+        'debris_volume': debris_volumes
+    })
+
+    temp_df['osmid'] = node_osmids[temp_df['nearest_osmid_idx']]
+
+    aggregated_volumes = temp_df.groupby('osmid')['debris_volume'].sum()
+
+    node_debris_volume_series.update(aggregated_volumes)
+    
+    print("  Mapping complete.")
+
+    results_df = node_debris_volume_series[node_debris_volume_series > 0].reset_index()
+    results_df.columns = ['osmid', 'total_CYD'] # Ensure column name is set
+    
+    results_df['osmid'] = results_df['osmid'].astype(str)
+    
+    print(f"  Aggregated debris for {len(results_df)} nodes.")
+    return results_df
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+output_filename = 'focus_area_NodalLoads.csv'
+output_path = os.path.join(output_base_dir, output_filename)
+
+
+```
+
+
+```{python}
+debris_loads_gdf = gpd.GeoDataFrame(
+    focus_area_loads_df,
+    geometry=gpd.points_from_xy(focus_area_loads_df['Load Longitude'], focus_area_loads_df['Load Latitude']),
+    crs="EPSG:4326" # Set the original CRS of your debris load data (WGS84 Lat/Lon)
+)
+print(f"Debris loads GeoDataFrame created with CRS: {debris_loads_gdf.crs}")
+```
+
+```{python}
+# Step 2: Reproject debris_loads_gdf to the target projected CRS (EPSG:26917)
+# This is essential for accurate distance calculations by the KD-tree.
+# EPSG:26917 is UTM Zone 17N, suitable for Florida.
+target_crs_for_mapping = 'EPSG:26917'
+debris_loads_gdf_proj = debris_loads_gdf.to_crs(target_crs_for_mapping)
+print(f"Debris loads reprojected to CRS: {debris_loads_gdf_proj.crs}")
+```
+
+```{python}
+# Step 1: Convert focus_area_loads_df to a GeoDataFrame
+
+
+# Step 3: Prepare the `debris_pixels_data` list expected by `map_debris_to_nodes_kdtree`
+debris_data_for_kdtree = [
+    (row.geometry.x, row.geometry.y, row.CYD)
+    for index, row in debris_loads_gdf_proj.iterrows()
+]
+print(f"Prepared {len(debris_data_for_kdtree)} debris items for KD-tree mapping.")
+
+# Step 4: Call map_debris_to_nodes_kdtree
+print("\n--- Mapping debris loads to nearest nodes using KD-Tree ---")
+nodal_debris_volumes_df = map_debris_to_nodes_kdtree(debris_data_for_kdtree, focus_area_nodes_gdf)
+
+# --- DEBUGGING INFORMATION ---
+print("\n--- Debugging `nodal_debris_volumes_df` after KD-Tree mapping ---")
+print(f"Is nodal_debris_volumes_df empty? {nodal_debris_volumes_df.empty}")
+if not nodal_debris_volumes_df.empty:
+    print("nodal_debris_volumes_df head:")
+    print(nodal_debris_volumes_df.head())
+    print("nodal_debris_volumes_df columns:")
+    print(nodal_debris_volumes_df.columns)
+else:
+    print("nodal_debris_volumes_df is empty. This means no debris was mapped to any node or input was empty.")
+print("--- End Debug ---")
+
+# Step 5: Prepare the final output DataFrame: osmid, x, y, total_CYD
+print("\n--- Preparing final output DataFrame ---")
+
+# Ensure 'osmid' is string type in nodes_gdf for consistent merging
+focus_area_nodes_gdf['osmid'] = focus_area_nodes_gdf['osmid'].astype(str)
+
+# Select relevant node columns (osmid, and original x, y from geometry)
+nodes_for_output_df = focus_area_nodes_gdf[['osmid', 'geometry']].copy()
+nodes_for_output_df['x'] = nodes_for_output_df.geometry.x # Longitude
+nodes_for_output_df['y'] = nodes_for_output_df.geometry.y # Latitude
+# Drop geometry and other unnecessary columns for the final output DataFrame
+nodes_for_output_df.drop(columns=['geometry', 'WKT', 'name'], inplace=True, errors='ignore')
+
+# Initialize the 'total_CYD' column in the output DataFrame to 0.0.
+# This ensures the column always exists, preventing KeyError if no debris is mapped.
+final_output_df = nodes_for_output_df.copy()
+final_output_df['total_CYD'] = 0.0
+
+# Update the 'total_CYD' column with aggregated volumes from the mapping.
+# Using .set_index() and .update() is more robust for merging from a potentially empty DataFrame.
+if not nodal_debris_volumes_df.empty:
+    # Set 'osmid' as the index for both DataFrames to use the .update() method
+    final_output_df = final_output_df.set_index('osmid')
+    nodal_debris_volumes_df_indexed = nodal_debris_volumes_df.set_index('osmid')
+
+    # Update only the 'total_CYD' column in final_output_df
+    final_output_df['total_CYD'].update(nodal_debris_volumes_df_indexed['total_CYD'])
+
+    # Reset index back
+    final_output_df = final_output_df.reset_index()
+else:
+    print("Warning: `nodal_debris_volumes_df` was empty. All nodes will have 0.0 total_CYD.")
+    # If nodal_debris_volumes_df is empty, final_output_df already has all total_CYD as 0.0
+
+# Reorder columns to match your desired output: osmid, x, y, total_CYD
+final_output_df = final_output_df[['osmid', 'x', 'y', 'total_CYD']]
+
+print(f"Final output DataFrame created. Shape: {final_output_df.shape}")
+print("\nExample of final output (showing top 5 nodes with debris):\n")
+print(final_output_df[final_output_df['total_CYD'] > 0].head())
+if not final_output_df[final_output_df['total_CYD'] == 0].empty:
+    print("\nExample of final output (showing top 5 nodes with no debris):\n")
+    print(final_output_df[final_output_df['total_CYD'] == 0].head())
+
+# Step 6: Save the output to CSV
+final_output_df.to_csv(output_path, index=False)
+print(f"\nOutput saved to: {output_path}")
+```
+
+```{python}
+# Step 3: Prepare the `debris_pixels_data` list expected by `map_debris_to_nodes_kdtree`
+# This list should contain tuples of (x_projected, y_projected, debris_volume_cyd).
+debris_data_for_kdtree = [
+    (row.geometry.x, row.geometry.y, row.CYD)
+    for index, row in debris_loads_gdf_proj.iterrows()
+]
+print(f"Prepared {len(debris_data_for_kdtree)} debris items for KD-tree mapping.")
+
+# Step 4: Call map_debris_to_nodes_kdtree
+print("\n--- Mapping debris loads to nearest nodes using KD-Tree ---")
+nodal_debris_volumes_df = map_debris_to_nodes_kdtree(debris_data_for_kdtree, focus_area_nodes_gdf)
+
+# Step 5: Prepare the final output DataFrame: osmid, x, y, total_CYD
+print("\n--- Consolidating Nodal Loads Output ---")
+
+# Ensure 'osmid' is string type in nodes_gdf for consistent merging
+focus_area_nodes_gdf['osmid'] = focus_area_nodes_gdf['osmid'].astype(str)
+
+# Select relevant node columns (osmid, and original x, y from geometry)
+# The 'x' and 'y' here will be the longitude and latitude of the nodes.
+nodes_for_output_df = focus_area_nodes_gdf[['osmid', 'geometry']].copy()
+nodes_for_output_df['x'] = nodes_for_output_df.geometry.x # Longitude
+nodes_for_output_df['y'] = nodes_for_output_df.geometry.y # Latitude
+nodes_for_output_df.drop(columns=['geometry', 'WKT', 'name'], inplace=True, errors='ignore') # Clean up temp/original columns
+
+# Merge the aggregated debris volumes (`total_CYD`) with the node coordinates (`osmid`, `x`, `y`)
+final_output_df = nodes_for_output_df.merge(
+    nodal_debris_volumes_df, on='osmid', how='left' # Left merge to keep all nodes
+)
+
+# Fill NaN values in 'total_CYD' with 0 for nodes that received no debris
+final_output_df['total_CYD'] = final_output_df['total_CYD'].fillna(0)
+
+# Reorder columns to match your desired output: osmid, x, y, total_CYD
+final_output_df = final_output_df[['osmid', 'x', 'y', 'total_CYD']]
+
+print(f"Final output DataFrame created. Shape: {final_output_df.shape}")
+print("\nExample of final output (showing top 5 nodes with debris):\n")
+print(final_output_df[final_output_df['total_CYD'] > 0].head())
+if not final_output_df[final_output_df['total_CYD'] == 0].empty:
+    print("\nExample of final output (showing top 5 nodes with no debris):\n")
+    print(final_output_df[final_output_df['total_CYD'] == 0].head())
+
+# Step 6: Save the output to CSV
+final_output_df.to_csv(output_path, index=False)
+print(f"\nOutput saved to: {output_path}")
+```

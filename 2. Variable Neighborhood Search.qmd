@@ -38,10 +38,11 @@ execute:
 # Setting Up Data
 
 ```{python}
-from pulp import *
+import pulp
 import pandas as pd
 import geopandas as gpd
 import networkx as nx
+import numpy as np
 import matplotlib.pyplot as plt
 import osmnx as ox
 import numpy as np
@@ -51,6 +52,13 @@ import copy
 import math
 from shapely import wkt
 import time
+import rasterio
+
+import traceback
+from rasterio.enums import Resampling
+from rasterio.warp import calculate_default_transform, reproject
+from shapely.geometry import Point, LineString
+from scipy.spatial import KDTree
 
 # Check the current working directory
 print("Current Working Directory:", os.getcwd())
@@ -65,11 +73,11 @@ script_directory = os.path.dirname(__file__)
 Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
 OSM_path = os.path.join(script_directory, 'input', 'OSM')
 QGIS_path = os.path.join(script_directory, 'input', 'QGIS')
-focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area 2') 
-Setup_path = os.path.join(script_directory, 'output', '1. Setup')
+focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area') 
+Setup_path = os.path.join(script_directory, 'output', '1. Setup', 'focus area')
 # Change file here for different focus area
 
-output_base_dir = os.path.join(script_directory, 'output', '2. Variable Neighborhood Search')
+output_base_dir = os.path.join(script_directory, 'output', '2. Variable Neighborhood Search', 'focus area')
 ```
 
 ## Lee County
@@ -77,6 +85,10 @@ output_base_dir = os.path.join(script_directory, 'output', '2. Variable Neighbor
 ```{python}
 # Load Thompson's daily debris activity report of Crowder Gulf during Hurricane Ian
 daily_path = os.path.join(Lee_County_path, 'Lee_Country_Daily_Report.xlsx')
+
+# Load debris load locations for entire Lee County
+load_path = os.path.join(Lee_County_path, 'Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv')
+load_path_df = pd.read_csv(load_path)
 
 # Load debris pile data for entire Lee County
 debris_path = os.path.join(Lee_County_path, 'piles_30oct2023a.csv')
@@ -101,6 +113,7 @@ edges_df = pd.read_csv(edges_path)
 focus_area_nodes_path = os.path.join(focus_area_path, 'focus_area_nodes.csv')
 focus_area_edges_path = os.path.join(focus_area_path, 'focus_area_edges.csv')
 focus_area_piles_path = os.path.join(focus_area_path, 'focus_area_piles.csv')
+focus_area_loads_path = os.path.join(focus_area_path, 'focus_area_loads.csv')
 focus_area_fire_station_path = os.path.join(focus_area_path, 'focus_area_fire_station.csv')
 focus_area_dms_path = os.path.join(focus_area_path, 'focus_area_dms.csv')
 focus_area_hospital_path = os.path.join(focus_area_path, 'focus_area_hospital.csv')
@@ -109,10 +122,14 @@ focus_area_fuel_site_path = os.path.join(focus_area_path, 'focus_area_fuel_site.
 focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
 focus_area_edges_df = pd.read_csv(focus_area_edges_path)
 focus_area_piles_df = pd.read_csv(focus_area_piles_path)
+focus_area_loads_df = pd.read_csv(focus_area_loads_path)
 focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
 focus_area_dms_df = pd.read_csv(focus_area_dms_path)
 focus_area_hospital_df = pd.read_csv(focus_area_hospital_path)
 focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
+
+# Load raster file for focus area
+raster_path = os.path.join(focus_area_path, 'Raster Data.tif')
 ```
 
 ## Output
@@ -120,29 +137,25 @@ focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
 ```{python}
 #
 focus_area_dms_node_with_trucks_path = os.path.join(Setup_path, 'focus_area_dms_node_with_trucks.csv')
-focus_area_EdgeLoads_Combined_path = os.path.join(Setup_path, 'focus_area_EdgeLoads_Combined.csv')
+focus_area_EdgeLoads_from_Raster_Combined_path = os.path.join(Setup_path, 'focus_area_EdgeLoads_from_Raster_Combined.csv')
 focus_area_fire_station_node_path = os.path.join(Setup_path, 'focus_area_fire_station_node.csv')
 focus_area_fuel_site_node_path = os.path.join(Setup_path, 'focus_area_fuel_site_node.csv')
 focus_area_hospital_node_path = os.path.join(Setup_path, 'focus_area_hospital_node.csv')
-focus_area_NodalLoads_path = os.path.join(Setup_path, 'focus_area_NodalLoads.csv')
+focus_area_NodalLoads_from_Raster_path = os.path.join(Setup_path, 'focus_area_NodalLoads_from_Raster.csv')
 
 # The dms's node_longitude and node_latitude and number of Trucks assigned
-focus_area_dms_node_with_trucks_nodes_df = pd.read_csv(focus_area_dms_node_with_trucks_path)
+focus_area_dms_node_with_trucks_df = pd.read_csv(focus_area_dms_node_with_trucks_path)
 # The edges' (u,v) from OSM and total_split_CYD of debris and distance (meters)
-focus_area_EdgeLoads_Combined_df = pd.read_csv(focus_area_EdgeLoads_Combined_path)
+focus_area_EdgeLoads_from_Raster_Combined_df = pd.read_csv(focus_area_EdgeLoads_from_Raster_Combined_path)
 # The fire stations' node_longitude and node_latitude
 focus_area_fire_station_node_df = pd.read_csv(focus_area_fire_station_node_path)
 # The fuel sites' node_longitude and node_latitude
 focus_area_fuel_site_node_df = pd.read_csv(focus_area_fuel_site_node_path)
 # The hospitals' node_longitude and node_latitude
 focus_area_hospital_node_df = pd.read_csv(focus_area_hospital_node_path) 
-focus_area_NodalLoads_df = pd.read_csv(focus_area_NodalLoads_path) # In case it is needed
 
-file_name = "haul_in_trucks_value.txt"
-full_file_path = os.path.join(Setup_path, file_name)
-with open(full_file_path, 'r') as f:
-    loaded_haul_in_trucks = int(f.read().strip())
-# print(f"Successfully read haul_in_trucks: {loaded_haul_in_trucks}")
+focus_area_NodalLoads_from_Raster_df = pd.read_csv(focus_area_NodalLoads_from_Raster_path) # In case it is needed
+
 ```
 
 # Variable Neighborhood Search (VNS) Implementation for Debris Removal Routing
