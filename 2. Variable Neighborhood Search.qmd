@@ -65,7 +65,7 @@ from scipy.spatial import KDTree # efficient nearest-neighbor searches
 from shapely import wkt # manipulation and analysis of planar geometric objects
 from shapely.geometry import Point, LineString, Polygon
 from shapely.ops import transform as shapely_transform
-
+from shapely.geometry import LineString
 import time
 import traceback # extract traces of programs
 
@@ -183,7 +183,7 @@ focus_area_NodalLoads_from_Raster_df = pd.read_csv(focus_area_NodalLoads_from_Ra
 TRUCK_SPEED_MPH = 30  # miles per hour
 METERS_PER_MILE = 1609.34  # meters per mile
 CLEANUP_RATE_PER_TRUCK_CYD_PER_HR = 40  # CYD per hour per truck
-TRUCK_CAPACITY_CYD = 40  # CYD per truck
+TRUCK_CAPACITY_CYD = 10  # CYD per truck
 TRAVEL_TIME_PER_METER = 1 / (TRUCK_SPEED_MPH * METERS_PER_MILE) * 3600 # seconds per meter
 
 # Define daily working hours by month
@@ -220,638 +220,6 @@ hospital_points_df = pd.read_csv(focus_area_hospital_path)
 fuel_site_points_df = pd.read_csv(focus_area_fuel_site_path)
 ```
 
-```python
-# Prepare GeoDataFrames for spatial operations
-nodes_df['geometry'] = nodes_df['WKT'].apply(wkt.loads)
-nodes_gdf = gpd.GeoDataFrame(nodes_df, geometry='geometry', crs='EPSG:4326')
-
-edges_df['geometry'] = edges_df['WKT'].apply(wkt.loads)
-edges_gdf = gpd.GeoDataFrame(edges_df, geometry='geometry', crs='EPSG:4326')
-
-dms_points_gdf = gpd.GeoDataFrame(dms_df, geometry=gpd.points_from_xy(dms_df.Longitude, dms_df.Latitude), crs='EPSG:4326')
-fire_station_points_gdf = gpd.GeoDataFrame(fire_station_points_df, geometry=gpd.points_from_xy(fire_station_points_df.Longitude, fire_station_points_df.Latitude), crs='EPSG:4326')
-hospital_points_gdf = gpd.GeoDataFrame(hospital_points_df, geometry=gpd.points_from_xy(hospital_points_df.Longitude, hospital_points_df.Latitude), crs='EPSG:4326')
-fuel_site_points_gdf = gpd.GeoDataFrame(fuel_site_points_df, geometry=gpd.points_from_xy(fuel_site_points_df.Longitude, fuel_site_points_df.Latitude), crs='EPSG:4326')
-```
-
-```{python}
-# Prepare GeoDataFrames for spatial operations
-nodes_df['geometry'] = nodes_df['WKT'].apply(wkt.loads)
-# --- FIX: Extract x and y coordinates from the geometry for graph building ---
-nodes_df['x'] = nodes_df['geometry'].apply(lambda p: p.x)
-nodes_df['y'] = nodes_df['geometry'].apply(lambda p: p.y)
-# --- END FIX ---
-nodes_gdf = gpd.GeoDataFrame(nodes_df, geometry='geometry', crs='EPSG:4326')
-
-edges_df['geometry'] = edges_df['WKT'].apply(wkt.loads)
-edges_gdf = gpd.GeoDataFrame(edges_df, geometry='geometry', crs='EPSG:4326')
-
-dms_points_gdf = gpd.GeoDataFrame(dms_df, geometry=gpd.points_from_xy(dms_df.Longitude, dms_df.Latitude), crs='EPSG:4326')
-fire_station_points_gdf = gpd.GeoDataFrame(fire_station_points_df, geometry=gpd.points_from_xy(fire_station_points_df.Longitude, fire_station_points_df.Latitude), crs='EPSG:4326')
-hospital_points_gdf = gpd.GeoDataFrame(hospital_points_df, geometry=gpd.points_from_xy(hospital_points_df.Longitude, hospital_points_df.Latitude), crs='EPSG:4326')
-fuel_site_points_gdf = gpd.GeoDataFrame(fuel_site_points_df, geometry=gpd.points_from_xy(fuel_site_points_df.Longitude, fuel_site_points_df.Latitude), crs='EPSG:4326')
-
-```
-
-```{python}
-# --- 4. Graph Construction ----------------------------------------------------
-print("Building the network graph...")
-G = nx.MultiDiGraph()
-
-# Add nodes from the GeoDataFrame
-for index, row in nodes_gdf.iterrows():
-    G.add_node(row['osmid'], x=row['x'], y=row['y'], geometry=row['geometry'])
-
-for osmid in G.nodes():
-    if 'x' not in G.nodes[osmid] or 'y' not in G.nodes[osmid]:
-        print(f"Node {osmid} missing 'x' or 'y'")
-```
-
-```{python}
-
-print(edge_loads_raster_df.columns)
-
-# Add edges with attributes including initial debris volume
-# We'll use the 'from_raster' data as the initial state
-for index, row in edges_gdf.iterrows():
-    u, v = row['u'], row['v']
-    # If the edge has debris from the raster dataset, add it. Otherwise, assume 0.
-    # debris_data = edge_loads_raster_df[(edge_loads_raster_df['u'] == u) & (edge_loads_raster_df['v'] == v)]
-    debris_data = edge_loads_raster_df[(edge_loads_raster_df['u'] == u) & (edge_loads_raster_df['v'] == v)] # & (edge_loads_raster_df['osmid'] == row['osmid'])]
-    debris_cyd = debris_data['total_split_CYD'].iloc[0] if not debris_data.empty else 0
-
-    # Add edge to the graph with a unique key
-    G.add_edge(u, v, key=row['osmid'], length=row['length'], geometry=row['geometry'], debris_cyd=debris_cyd)
-    # Also add the reverse edge since roads are bidirectional
-    G.add_edge(v, u, key=row['osmid'], length=row['length'], geometry=row['geometry'], debris_cyd=debris_cyd)
-
-# Create a KD-Tree for efficient nearest neighbor search on nodes
-# node_osmid_list = list(G.nodes())
-# node_coords = np.array([[G.nodes[osmid]['x'], G.nodes[osmid]['y']] for osmid in node_osmid_list])
-node_osmid_list = [osmid for osmid in G.nodes() if 'x' in G.nodes[osmid] and 'y' in G.nodes[osmid]]
-node_coords = np.array([[G.nodes[osmid]['x'], G.nodes[osmid]['y']] for osmid in node_osmid_list])
-node_kdtree = KDTree(node_coords)
-osmid_to_kdtree_index = {osmid: i for i, osmid in enumerate(node_osmid_list)}
-```
-
-```{python}
-def find_nearest_node_to_point(point):
-    """Finds the closest node osmid to a given point using the KDTree."""
-    # Convert point to the same coordinate system as the KDTree
-    dist, index = node_kdtree.query([point.x, point.y])
-    return node_osmid_list[index]
-
-# Map facility locations to the nearest node in the graph
-dms_node_map = {row['Disposal Site']: find_nearest_node_to_point(row['geometry']) for _, row in dms_points_gdf.iterrows()}
-fire_station_node_map = {row['Name']: find_nearest_node_to_point(row['geometry']) for _, row in fire_station_points_gdf.iterrows()}
-hospital_node_map = {row['Name']: find_nearest_node_to_point(row['geometry']) for _, row in hospital_points_gdf.iterrows()}
-fuel_site_node_map = {row['Disposal Site']: find_nearest_node_to_point(row['geometry']) for _, row in fuel_site_points_gdf.iterrows()}
-```
-
-```{python}
-# --- 5. VNS and Simulation Functions ------------------------------------------
-
-def get_working_hours(date):
-    """Returns the daily working hours based on the month."""
-    return WORK_HOURS_PER_MONTH.get(date.month, 8) # Default to 8 hours if month not specified
-
-def get_total_cleanup_time(debris_cyd, num_trucks):
-    """Calculates cleanup time for a given amount of debris."""
-    if num_trucks == 0:
-        return float('inf') # Cannot clean with no trucks
-    return debris_cyd / (num_trucks * CLEANUP_RATE_PER_TRUCK_CYD_PER_HR) * 3600 # seconds
-
-def get_edge_cost(u, v, G, num_trucks):
-    """Calculates the total time cost (travel + cleanup) for an edge."""
-    edge_data = G.get_edge_data(u, v)
-    if not edge_data:
-        return float('inf') # No direct path exists
-
-    length_m = edge_data[0]['length']
-    debris_cyd = edge_data[0]['debris_cyd']
-
-    travel_time_s = length_m * TRAVEL_TIME_PER_METER
-    cleanup_time_s = get_total_cleanup_time(debris_cyd, num_trucks)
-
-    return travel_time_s + cleanup_time_s
-```
-
-```python
-def calculate_route_cost_and_path(G, start_node, end_node, num_trucks, current_load, dms_node, current_debris_state):
-    """
-    Calculates the time cost and path for a route from start_node to end_node,
-    handling truck capacity and return trips to the DMS.
-    """
-    # Create a copy of the graph to simulate cleaning and dynamic loads
-    sim_G = G.copy()
-    total_time_s = 0
-    total_distance_m = 0
-    current_path_nodes = []
-    
-    # Use Dijkstra's algorithm to find the shortest path in terms of time
-    try:
-        path = nx.shortest_path(sim_G, start_node, end_node, weight=lambda u, v, d: get_edge_cost(u, v, sim_G, num_trucks))
-    except nx.NetworkXNoPath:
-        print(f"  [ERROR] No path found from {start_node} to {end_node}.")
-        return None, 0, 0
-
-    current_path_nodes.append(start_node)
-    
-    # Simulate traversal of the path
-    for i in range(len(path) - 1):
-        u, v = path[i], path[i+1]
-        
-        edge_data = sim_G.get_edge_data(u, v)[0]
-        debris_cyd_on_edge = current_debris_state.get((u, v, edge_data['key']), 0)
-        
-        length_m = edge_data['length']
-        travel_time_s = length_m * TRAVEL_TIME_PER_METER
-        cleanup_time_s = get_total_cleanup_time(debris_cyd_on_edge, num_trucks)
-
-        total_time_s += travel_time_s + cleanup_time_s
-        total_distance_m += length_m
-        
-        # Simulate cleanup, checking for truck capacity
-        cleaned_cyd = min(debris_cyd_on_edge, (num_trucks * TRUCK_CAPACITY_CYD) - current_load)
-        current_load += cleaned_cyd
-        current_debris_state[(u, v, edge_data['key'])] -= cleaned_cyd
-
-        # Update debris state in the graph copy
-        sim_G.get_edge_data(u, v)[0]['debris_cyd'] -= cleaned_cyd
-        sim_G.get_edge_data(v, u)[0]['debris_cyd'] -= cleaned_cyd # Update reverse edge too
-
-        # If truck capacity is reached, go back to DMS
-        if current_load >= (num_trucks * TRUCK_CAPACITY_CYD):
-            print("  [INFO] Truck capacity reached. Returning to DMS.")
-            # Calculate time to get back to DMS
-            return_path = nx.shortest_path(sim_G, v, dms_node, weight=lambda u, v, d: d[0]['length'] * TRAVEL_TIME_PER_METER)
-            return_dist = sum(sim_G.get_edge_data(return_path[j], return_path[j+1])[0]['length'] for j in range(len(return_path)-1))
-            return_time_s = return_dist * TRAVEL_TIME_PER_METER
-
-            # Update total time and distance for return trip
-            total_time_s += return_time_s
-            total_distance_m += return_dist
-            current_path_nodes.extend(return_path[1:])
-            
-            # Reset load and calculate time to go back to the current position (v)
-            current_load = 0
-            
-            # Calculate time to get back to where we left off
-            resume_path = nx.shortest_path(sim_G, dms_node, v, weight=lambda u, v, d: d[0]['length'] * TRAVEL_TIME_PER_METER)
-            resume_dist = sum(sim_G.get_edge_data(resume_path[j], resume_path[j+1])[0]['length'] for j in range(len(resume_path)-1))
-            resume_time_s = resume_dist * TRAVEL_TIME_PER_METER
-            
-            total_time_s += resume_time_s
-            total_distance_m += resume_dist
-            current_path_nodes.extend(resume_path[1:])
-            
-        current_path_nodes.append(v)
-    
-    return current_path_nodes, total_time_s, total_distance_m
-```
-
-```{python}
-def calculate_route_cost_and_path(G, start_node, end_node, num_trucks, current_load, dms_node, current_debris_state):
-    """
-    Calculates the time cost and path for a route from start_node to end_node,
-    handling truck capacity and return trips to the DMS.
-    """
-    sim_G = G.copy()
-    total_time_s = 0
-    total_distance_m = 0
-    total_debris_cleared_cyd = 0
-    current_path_nodes = []
-    
-    try:
-        path = nx.shortest_path(sim_G, start_node, end_node, weight=lambda u, v, d: get_edge_cost(u, v, sim_G, num_trucks))
-    except nx.NetworkXNoPath:
-        print(f"  [ERROR] No path found from {start_node} to {end_node}.")
-        return None, 0, 0, 0
-
-    current_path_nodes.append(start_node)
-    
-    for i in range(len(path) - 1):
-        u, v = path[i], path[i+1]
-        edge_data = sim_G.get_edge_data(u, v)[0]
-        
-        debris_cyd_on_edge = edge_data['debris_cyd']
-        
-        length_m = edge_data['length']
-        travel_time_s = length_m * TRAVEL_TIME_PER_METER
-        cleanup_time_s = get_total_cleanup_time(debris_cyd_on_edge, num_trucks)
-
-        total_time_s += travel_time_s + cleanup_time_s
-        total_distance_m += length_m
-        
-        # Simulate cleanup, checking for truck capacity
-        cleaned_cyd = min(debris_cyd_on_edge, (num_trucks * TRUCK_CAPACITY_CYD) - current_load)
-        current_load += cleaned_cyd
-        total_debris_cleared_cyd += cleaned_cyd
-        
-        # Update debris state in the graph copy
-        sim_G.get_edge_data(u, v)[0]['debris_cyd'] -= cleaned_cyd
-        sim_G.get_edge_data(v, u)[0]['debris_cyd'] -= cleaned_cyd # Update reverse edge too
-
-        if current_load >= (num_trucks * TRUCK_CAPACITY_CYD):
-            print("  [INFO] Truck capacity reached. Returning to DMS.")
-            return_path = nx.shortest_path(sim_G, v, dms_node, weight=lambda u, v, d: d[0]['length'] * TRAVEL_TIME_PER_METER)
-            
-            for j in range(len(return_path) - 1):
-                return_dist = sim_G.get_edge_data(return_path[j], return_path[j+1])[0]['length']
-                total_distance_m += return_dist
-                total_time_s += return_dist * TRAVEL_TIME_PER_METER
-                current_path_nodes.append(return_path[j+1])
-            
-            current_load = 0
-            
-            resume_path = nx.shortest_path(sim_G, dms_node, v, weight=lambda u, v, d: d[0]['length'] * TRAVEL_TIME_PER_METER)
-            
-            for j in range(len(resume_path) - 1):
-                resume_dist = sim_G.get_edge_data(resume_path[j], resume_path[j+1])[0]['length']
-                total_distance_m += resume_dist
-                total_time_s += resume_dist * TRAVEL_TIME_PER_METER
-                current_path_nodes.append(resume_path[j+1])
-        
-        current_path_nodes.append(v)
-    
-    return current_path_nodes, total_time_s, total_distance_m, total_debris_cleared_cyd
-```
-
-```{python}
-def two_opt_swap(route, i, k):
-    """
-    Performs a 2-opt swap on a given route.
-    Args:
-        route (list): A list of node IDs representing the route.
-        i (int): The first index to swap.
-        k (int): The second index to swap.
-    Returns:
-        list: The new route after the swap.
-    """
-    new_route = route[:i] + route[i:k+1][::-1] + route[k+1:]
-    return new_route
-```
-
-```python
-def local_search(G, initial_route, num_trucks, current_load, dms_node, current_debris_state):
-    """
-    Improves a route using a 2-opt local search heuristic.
-    Returns the improved route and its cost.
-    """
-    best_route = initial_route
-    best_cost = calculate_route_cost_and_path(G, best_route[0], best_route[-1], num_trucks, current_load, dms_node, current_debris_state)[1]
-    
-    improved = True
-    while improved:
-        improved = False
-        for i in range(1, len(best_route) - 2):
-            for k in range(i + 1, len(best_route) - 1):
-                new_route = two_opt_swap(best_route, i, k)
-                new_cost = calculate_route_cost_and_path(G, new_route[0], new_route[-1], num_trucks, current_load, dms_node, current_debris_state)[1]
-                
-                if new_cost < best_cost:
-                    best_route = new_route
-                    best_cost = new_cost
-                    improved = True
-    return best_route, best_cost
-```
-
-```{python}
-def local_search(G, initial_route, num_trucks, current_load, dms_node):
-    """
-    Improves a route using a 2-opt local search heuristic.
-    Returns the improved route and its cost.
-    """
-    best_route = initial_route
-    
-    # We use a simplified cost for the local search to avoid repeated complex calculations
-    def calculate_simple_cost(path):
-        cost = 0
-        for i in range(len(path) - 1):
-            cost += G.get_edge_data(path[i], path[i+1])[0]['length']
-        return cost
-
-    best_cost = calculate_simple_cost(best_route)
-    
-    improved = True
-    while improved:
-        improved = False
-        for i in range(1, len(best_route) - 2):
-            for k in range(i + 1, len(best_route) - 1):
-                new_route = two_opt_swap(best_route, i, k)
-                new_cost = calculate_simple_cost(new_route)
-                
-                if new_cost < best_cost:
-                    best_route = new_route
-                    best_cost = new_cost
-                    improved = True
-    return best_route, best_cost
-```
-
-```{python}
-def shaking(route, k):
-    """
-    Shakes the route by performing k random 2-opt swaps.
-    Args:
-        route (list): The original route.
-        k (int): The number of random swaps to perform.
-    Returns:
-        list: The shaken route.
-    """
-    shaken_route = route.copy()
-    n = len(route)
-    for _ in range(k):
-        i, j = np.random.choice(range(1, n-1), 2, replace=False)
-        if i > j:
-            i, j = j, i
-        shaken_route = two_opt_swap(shaken_route, i, j)
-    return shaken_route
-```
-
-
-```{python}
-# --- 6. Main Simulation Loop --------------------------------------------------
-print("Starting the VNS simulation...")
-current_date = START_DATE
-total_simulation_time = timedelta(0)
-total_simulation_distance = 0
-total_simulation_debris_cleared = 0
-
-# Store the final paths and nodes for QGIS
-qgis_paths_data = []
-
-# Initialize DMS states
-dms_states = {}
-for dms_name, dms_node in dms_node_map.items():
-    dms_states[dms_name] = {
-        'dms_node': dms_node,
-        'current_node': dms_node,
-        'trucks_assigned': 0,
-        'current_load_cyd': 0,
-        'total_time_s': 0,
-        'total_distance_m': 0,
-        'total_debris_cleared_cyd': 0, # Added debris cleared tracker
-        'path_history_nodes': []
-    }
-
-# Initialize the debris state from the raster data
-debris_map = {(row['u'], row['v'], row['osmid']): row['total_split_CYD'] for _, row in edge_loads_raster_df.iterrows()}
-current_debris_state = { (row['u'], row['v'], row['osmid']): debris_map.get((row['u'], row['v'], row['osmid']), 0) for _, row in edges_gdf.iterrows() }
-
-unvisited_fire_stations = set(fire_station_node_map.keys())
-unvisited_hospitals = set(hospital_node_map.keys())
-unvisited_fuel_sites = set(fuel_site_node_map.keys())
-```
-
-
-```python
-# --- 6. Main Simulation Loop --------------------------------------------------
-print("Starting the VNS simulation...")
-current_date = START_DATE
-total_simulation_time = timedelta(0)
-total_simulation_distance = 0
-total_simulation_debris_cleared = 0
-
-
-# Store the final paths and nodes for QGIS
-qgis_paths_data = []
-qgis_nodes_data = []
-
-# Initialize DMS states
-dms_states = {}
-for dms_name, dms_node in dms_node_map.items():
-    dms_states[dms_name] = {
-        'dms_node': dms_node,
-        'current_node': dms_node,
-        'trucks_assigned': 0,
-        'current_load_cyd': 0,
-        'total_time_s': 0,
-        'total_distance_m': 0,
-        'path_history_nodes': [],
-        'path_history_edges': []
-    }
-
-# --- FIX: Correctly initialize the debris state from the raster data ---
-# The previous line caused a KeyError because edges_gdf does not contain debris data.
-# This new logic ensures a complete debris state is created, with 0 CYD for edges without debris.
-print("Initializing debris state...")
-debris_map = {(row['u'], row['v'], row['osmid']): row['total_split_CYD'] for _, row in edge_loads_raster_df.iterrows()}
-current_debris_state = { (row['u'], row['v'], row['osmid']): debris_map.get((row['u'], row['v'], row['osmid']), 0) for _, row in edges_gdf.iterrows() }
-# --- END FIX ---
-
-unvisited_fire_stations = set(fire_station_node_map.keys())
-unvisited_hospitals = set(hospital_node_map.keys())
-unvisited_fuel_sites = set(fuel_site_node_map.keys())
-```
-
-```{python}
-while current_date <= END_DATE:
-    print(f"\n--- Simulating Day: {current_date.strftime('%Y-%m-%d')} ---")
-    daily_working_hours = get_working_hours(current_date)
-    daily_working_seconds = daily_working_hours * 3600
-    
-    # Update truck counts for the day
-    dms_trucks_today = dms_trucks_df[dms_trucks_df['Load Date'] == current_date.strftime('%m/%d/%Y')]
-    
-    for dms_name, state in dms_states.items():
-        state['path_history_nodes'].append(state['current_node']) # Log the starting node for the day
-        
-        dms_trucks_for_today = dms_trucks_today[dms_trucks_today['Disposal Site'] == dms_name]
-        num_trucks = dms_trucks_for_today['Trucks'].sum()
-        state['trucks_assigned'] = num_trucks
-        
-        if num_trucks == 0:
-            print(f"  DMS: {dms_name} - No trucks assigned today. Time elapsed: {daily_working_hours} hours.")
-            state['total_time_s'] += daily_working_seconds
-            continue
-            
-        print(f"  DMS: {dms_name} - {num_trucks} trucks assigned. Current node: {state['current_node']}.")
-
-        daily_time_spent_s = 0
-        while daily_time_spent_s < daily_working_seconds:
-            # --- 6.1. Find Nearest Target -----------------------------------------
-            target_node = None
-            target_name = None
-            
-            # Priority 1: Fire Stations
-            if unvisited_fire_stations:
-                closest_dist = float('inf')
-                for fs_name, fs_node in fire_station_node_map.items():
-                    if fs_name in unvisited_fire_stations:
-                        try:
-                            dist = nx.shortest_path_length(G, state['current_node'], fs_node, weight='length')
-                            if dist < closest_dist:
-                                closest_dist = dist
-                                target_node = fs_node
-                                target_name = fs_name
-                        except nx.NetworkXNoPath:
-                            continue
-                if target_node:
-                    print(f"    Target found: Nearest Fire Station '{target_name}'.")
-
-            # Priority 2: Hospitals
-            if not target_node and unvisited_hospitals:
-                closest_dist = float('inf')
-                for h_name, h_node in hospital_node_map.items():
-                    if h_name in unvisited_hospitals:
-                        try:
-                            dist = nx.shortest_path_length(G, state['current_node'], h_node, weight='length')
-                            if dist < closest_dist:
-                                closest_dist = dist
-                                target_node = h_node
-                                target_name = h_name
-                        except nx.NetworkXNoPath:
-                            continue
-                if target_node:
-                    print(f"    Target found: Nearest Hospital '{target_name}'.")
-
-            # Priority 3: Fuel Sites
-            if not target_node and unvisited_fuel_sites:
-                closest_dist = float('inf')
-                for f_name, f_node in fuel_site_node_map.items():
-                    if f_name in unvisited_fuel_sites:
-                        try:
-                            dist = nx.shortest_path_length(G, state['current_node'], f_node, weight='length')
-                            if dist < closest_dist:
-                                closest_dist = dist
-                                target_node = f_node
-                                target_name = f_name
-                        except nx.NetworkXNoPath:
-                            continue
-                if target_node:
-                    print(f"    Target found: Nearest Fuel Site '{target_name}'.")
-
-            if not target_node:
-                print("    No unvisited emergency facilities left. DMS operation complete.")
-                break
-
-            # --- 6.2. Run VNS for the Route ---------------------------------------
-            try:
-                initial_route = nx.shortest_path(G, state['current_node'], target_node, weight='length')
-                
-                best_route = initial_route
-                
-                for _ in range(5):
-                    shaken_route = shaking(best_route, k=2)
-                    improved_route, _ = local_search(G, shaken_route, num_trucks, state['current_load_cyd'], state['dms_node'])
-                    
-                    initial_best_cost = sum(G.get_edge_data(u, v)[0]['length'] for u, v in zip(best_route[:-1], best_route[1:]))
-                    new_best_cost = sum(G.get_edge_data(u, v)[0]['length'] for u, v in zip(improved_route[:-1], improved_route[1:]))
-                    
-                    if new_best_cost < initial_best_cost:
-                        best_route = improved_route
-
-                # --- 6.3. Simulate the chosen route ---------------------------------
-                # Before simulation, get the initial debris state on the best route
-                initial_debris_on_path = sum(G.get_edge_data(u, v)[0]['debris_cyd'] for u, v in zip(best_route[:-1], best_route[1:]))
-
-                # Simulate the chosen path
-                total_route_nodes, route_time, route_dist, cleared_debris_cyd = calculate_route_cost_and_path(G, state['current_node'], target_node, num_trucks, state['current_load_cyd'], state['dms_node'], current_debris_state)
-                
-                if total_route_nodes is None:
-                    if target_name in unvisited_fire_stations: unvisited_fire_stations.remove(target_name)
-                    elif target_name in unvisited_hospitals: unvisited_hospitals.remove(target_name)
-                    elif target_name in unvisited_fuel_sites: unvisited_fuel_sites.remove(target_name)
-                    continue
-
-                if daily_time_spent_s + route_time > daily_working_seconds:
-                    print(f"    Not enough time left today to complete the route. Stopping at the last possible node.")
-                    
-                    remaining_time = daily_working_seconds - daily_time_spent_s
-                    cumulative_time = 0
-                    end_node_for_day = state['current_node']
-                    
-                    # Update path and stats for the portion of the route completed
-                    for i in range(len(total_route_nodes) - 1):
-                        u, v = total_route_nodes[i], total_route_nodes[i+1]
-                        time_on_edge = get_edge_cost(u, v, G, num_trucks)
-                        if cumulative_time + time_on_edge > remaining_time:
-                            state['current_node'] = u
-                            state['total_time_s'] += cumulative_time
-                            state['total_distance_m'] += sum(G.get_edge_data(total_route_nodes[j], total_route_nodes[j+1])[0]['length'] for j in range(i))
-                            state['path_history_nodes'].extend(total_route_nodes[1:i+1])
-                            break
-                        else:
-                            cumulative_time += time_on_edge
-                            end_node_for_day = v
-                            state['path_history_nodes'].append(v)
-                            
-                    daily_time_spent_s = daily_working_seconds
-                else:
-                    daily_time_spent_s += route_time
-                    state['total_time_s'] += route_time
-                    state['total_distance_m'] += route_dist
-                    state['current_node'] = target_node
-                    state['path_history_nodes'].extend(total_route_nodes[1:])
-                    state['total_debris_cleared_cyd'] += cleared_debris_cyd
-                    
-                    # Mark the target as visited
-                    if target_name in unvisited_fire_stations: unvisited_fire_stations.remove(target_name)
-                    elif target_name in unvisited_hospitals: unvisited_hospitals.remove(target_name)
-                    elif target_name in unvisited_fuel_sites: unvisited_fuel_sites.remove(target_name)
-                    
-                    print(f"    Route to '{target_name}' completed. Time: {str(timedelta(seconds=int(route_time)))}, Distance: {route_dist:.2f} meters.")
-                    print(f"    Debris cleared on this route: {cleared_debris_cyd:.2f} CYD.")
-
-            except Exception as e:
-                print(f"  [ERROR] An error occurred during VNS or path calculation: {e}")
-                import traceback
-                traceback.print_exc()
-                break
-
-    current_date += timedelta(days=1)
-```
-
-```{python}
-# --- 7. Final Output for QGIS Visualization -----------------------------------
-print("\nSimulation complete. Preparing data for QGIS visualization...")
-
-# Create GeoDataFrame for DMS and Facility locations
-all_facilities = pd.concat([
-    dms_points_gdf.rename(columns={'Disposal Site': 'name'}).assign(type='DMS'),
-    fire_station_points_gdf.rename(columns={'Name': 'name'}).assign(type='Fire Station'),
-    hospital_points_gdf.rename(columns={'Name': 'name'}).assign(type='Hospital'),
-    fuel_site_points_gdf.rename(columns={'Disposal Site': 'name'}).assign(type='Fuel Site')
-])
-all_facilities.to_file(os.path.join(output_base_dir, "facilities.geojson"), driver='GeoJSON')
-
-# Create GeoDataFrame for the truck paths
-path_rows = []
-total_sim_time = timedelta(0)
-total_sim_dist = 0
-total_sim_debris = 0
-
-for dms_name, state in dms_states.items():
-    if len(state['path_history_nodes']) > 1:
-        for i in range(len(state['path_history_nodes']) - 1):
-            start_node = G.nodes[state['path_history_nodes'][i]]
-            end_node = G.nodes[state['path_history_nodes'][i+1]]
-            line_geom = LineString([(start_node['x'], start_node['y']), (end_node['x'], end_node['y'])])
-            
-            path_rows.append({
-                'dms_name': dms_name,
-                'datetime': START_DATE + timedelta(seconds=state['total_time_s']),
-                'geometry': line_geom
-            })
-    
-    # Final summary for each DMS
-    print(f"\n--- Summary for DMS: {dms_name} ---")
-    print(f"  Total time: {str(timedelta(seconds=int(state['total_time_s'])))}, Total distance: {state['total_distance_m'] / 1000:.2f} km")
-    print(f"  Total debris cleared: {state['total_debris_cleared_cyd']:.2f} CYD.")
-    
-    total_sim_time += timedelta(seconds=int(state['total_time_s']))
-    total_sim_dist += state['total_distance_m']
-    total_sim_debris += state['total_debris_cleared_cyd']
-
-paths_gdf = gpd.GeoDataFrame(path_rows, crs='EPSG:4326')
-paths_gdf.to_file(os.path.join(output_base_dir, "dms_paths.geojson"), driver='GeoJSON')
-
-print("\n--- Grand Total Simulation Summary ---")
-print(f"Total simulation time (sum): {str(total_sim_time)}, Total simulation distance (sum): {total_sim_dist / 1000:.2f} km")
-print(f"Total debris cleared (sum): {total_sim_debris:.2f} CYD.")
-print(f"\nQGIS-compatible GeoJSON files for facilities and paths have been saved to: {output_base_dir}")
-
-```
 
 ```{python}
 # --- 3. Data Loading and Preprocessing ----------------------------------------
@@ -961,6 +329,8 @@ total_simulation_time = timedelta(0)
 total_simulation_distance = 0
 total_simulation_debris_cleared = 0
 
+# New list to store points for the time-lapse GeoJSON
+timelapse_points = []
 # Store the final paths and nodes for QGIS
 qgis_paths_data = []
 
@@ -1005,6 +375,14 @@ while current_date <= END_DATE:
     for dms_name, state in dms_states.items():
         state['path_history_nodes'].append(state['current_node']) # Log the starting node for the day
         
+        # New: Add the starting point for the day to the timelapse data
+        start_coords = G.nodes[state['current_node']]
+        timelapse_points.append({
+            'dms_name': dms_name,
+            'datetime': START_DATE + timedelta(seconds=state['total_time_s']),
+            'geometry': Point(start_coords['x'], start_coords['y'])
+        })
+
         dms_trucks_for_today = dms_trucks_today[dms_trucks_today['Disposal Site'] == dms_name]
         num_trucks = dms_trucks_for_today['Trucks'].sum()
         state['trucks_assigned'] = num_trucks
@@ -1117,6 +495,14 @@ while current_date <= END_DATE:
                 state['path_history_nodes'].append(v)
                 state['current_node'] = v
 
+                # New: Add the current position and timestamp to the timelapse data
+                end_coords = G.nodes[state['current_node']]
+                timelapse_points.append({
+                    'dms_name': dms_name,
+                    'datetime': START_DATE + timedelta(seconds=state['total_time_s'] + daily_time_spent_s),
+                    'geometry': Point(end_coords['x'], end_coords['y'])
+                })
+
                 # Handle debris cleanup on this edge
                 debris_cyd_on_edge = debris_remaining.get((u, v), 0)
                 if debris_cyd_on_edge > 0:
@@ -1226,6 +612,12 @@ for dms_name, state in dms_states.items():
 
 paths_gdf = gpd.GeoDataFrame(path_rows, crs='EPSG:4326')
 paths_gdf.to_file(os.path.join(output_base_dir, "dms_paths.geojson"), driver='GeoJSON')
+
+# New: Create the time-lapse GeoJSON file from the collected points
+timelapse_gdf = gpd.GeoDataFrame(timelapse_points, crs='EPSG:4326')
+output_timelapse_path = os.path.join(output_base_dir, 'dms_points_timelapse.geojson')
+timelapse_gdf.to_file(output_timelapse_path, driver='GeoJSON')
+print(f"Time-lapse GeoJSON file for truck points has been saved to: {output_timelapse_path}")
 
 print("\n--- Grand Total Simulation Summary ---")
 print(f"Total simulation time (sum): {str(total_sim_time)}, Total simulation distance (sum): {total_sim_dist / 1000:.2f} km")
