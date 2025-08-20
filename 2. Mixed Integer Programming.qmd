@@ -1,0 +1,429 @@
+---
+title: "Mixed Integer Programming"
+author: "Leanh Nguyen (Ln14)"
+
+date: 2025-04-04
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+  jupyter: python3
+---
+
+{{< pagebreak >}}
+
+# Setting Up Data
+Description
+- Imports libraries, set working directory, and set input/output folders
+```{python}
+# Import libraries
+import copy
+from datetime import datetime, timedelta
+from functools import partial
+import geopandas as gpd # geospatial data
+import math # standard math functions and constants
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np # scientific computing
+import os # operating system interaction
+import osmnx as ox # OpenStreetMap: analysis and visualization of street networks
+import pandas as pd # data manipulation and analysis
+import pulp
+import random # pseudo-random number generator and operations
+
+import rasterio # geospatial raster data
+from rasterio.enums import Resampling
+from rasterio.warp import calculate_default_transform, reproject
+from rasterio.features import rasterize
+from rasterio.mask import mask
+
+from scipy.spatial import KDTree # efficient nearest-neighbor searches
+
+from shapely import wkt # manipulation and analysis of planar geometric objects
+from shapely.geometry import Point, LineString, Polygon
+from shapely.ops import transform as shapely_transform
+from shapely.geometry import LineString
+import time
+import traceback # extract traces of programs
+
+# Check the current working directory
+print("Current Working Directory:", os.getcwd())
+
+# Set the working directory to the project root if necessary
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+
+# Get the directory where current Python script is located. This makes paths relative to the project's root
+script_directory = os.path.dirname(__file__)
+
+# Construct the path to 'input' folder relative to the script. Assumes 'input' folder is in the same (sub-)directory as script
+Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
+OSM_path = os.path.join(script_directory, 'input', 'OSM')
+QGIS_path = os.path.join(script_directory, 'input', 'QGIS')
+focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area') 
+Setup_path = os.path.join(script_directory, 'output', '1. Setup', 'focus area')
+# Change file here for different focus area
+
+output_base_dir = os.path.join(script_directory, 'output', '3. Mixed Integer Programming', 'focus area')
+```
+
+## Lee County
+Description
+- Sets up the input paths to Lee County datasets
+```{python}
+# Load Thompson's daily debris activity report of Crowder Gulf during Hurricane Ian
+daily_path = os.path.join(Lee_County_path, 'Lee_Country_Daily_Report.xlsx')
+
+# Load debris load locations for entire Lee County
+load_path = os.path.join(Lee_County_path, 'Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv')
+load_path_df = pd.read_csv(load_path)
+
+# Load debris pile data for entire Lee County
+debris_path = os.path.join(Lee_County_path, 'piles_30oct2023a.csv')
+
+# Load DMS locations from Lee County's Hurricane Support Map
+DMS_path = os.path.join(Lee_County_path, 'DMS.csv')
+
+# Load fire station locations from Lee County's Hurricane Support Map
+fire_station_path = os.path.join(Lee_County_path, 'fire_station.csv')
+```
+
+## QGIS
+Description
+- Sets up the input paths to QGIS data and reads them
+```{python}
+# Load filtered nodes and edges files
+nodes_path = os.path.join(QGIS_path, 'Network_nodes_filtered.csv')
+edges_path = os.path.join(QGIS_path, 'Network_edges_filtered.csv')
+nodes_df = pd.read_csv(nodes_path)
+edges_df = pd.read_csv(edges_path)
+
+# Load filtered (critical) nodes, edges, and debris piles of chosen focus area
+focus_area_nodes_path = os.path.join(focus_area_path, 'focus_area_nodes.csv')
+focus_area_edges_path = os.path.join(focus_area_path, 'focus_area_edges.csv')
+focus_area_piles_path = os.path.join(focus_area_path, 'focus_area_piles.csv')
+focus_area_loads_path = os.path.join(focus_area_path, 'focus_area_loads.csv')
+focus_area_fire_station_path = os.path.join(focus_area_path, 'focus_area_fire_station.csv')
+focus_area_dms_path = os.path.join(focus_area_path, 'focus_area_dms.csv')
+focus_area_hospital_path = os.path.join(focus_area_path, 'focus_area_hospital.csv')
+focus_area_fuel_site_path = os.path.join(focus_area_path, 'focus_area_fuel_site.csv')
+
+focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
+focus_area_edges_df = pd.read_csv(focus_area_edges_path)
+focus_area_piles_df = pd.read_csv(focus_area_piles_path)
+focus_area_loads_df = pd.read_csv(focus_area_loads_path)
+focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
+focus_area_dms_df = pd.read_csv(focus_area_dms_path)
+focus_area_hospital_df = pd.read_csv(focus_area_hospital_path)
+focus_area_fuel_site_df = pd.read_csv(focus_area_fuel_site_path)
+
+# Load raster file for focus area
+raster_path = os.path.join(focus_area_path, 'Raster Data.tif')
+```
+
+## Output
+```{python}
+#
+focus_area_dms_node_with_trucks_path = os.path.join(Setup_path, 'focus_area_dms_node_with_trucks.csv')
+focus_area_EdgeLoads_Combined_path = os.path.join(Setup_path, 'focus_area_EdgeLoads_Combined.csv')
+focus_area_EdgeLoads_from_Raster_Combined_path = os.path.join(Setup_path, 'focus_area_EdgeLoads_from_Raster_Combined.csv')
+focus_area_fire_station_node_path = os.path.join(Setup_path, 'focus_area_fire_station_node.csv')
+focus_area_fuel_site_node_path = os.path.join(Setup_path, 'focus_area_fuel_site_node.csv')
+focus_area_hospital_node_path = os.path.join(Setup_path, 'focus_area_hospital_node.csv')
+focus_area_NodalLoads_from_Raster_path = os.path.join(Setup_path, 'focus_area_NodalLoads_from_Raster.csv')
+
+# The dms's node_longitude and node_latitude and number of Trucks assigned
+focus_area_dms_node_with_trucks_df = pd.read_csv(focus_area_dms_node_with_trucks_path)
+focus_area_EdgeLoads_Combined_df = pd.read_csv(focus_area_EdgeLoads_Combined_path)
+# The edges' (u,v) from OSM and total_split_CYD of debris and distance (meters)
+focus_area_EdgeLoads_from_Raster_Combined_df = pd.read_csv(focus_area_EdgeLoads_from_Raster_Combined_path)
+# The fire stations' node_longitude and node_latitude
+focus_area_fire_station_node_df = pd.read_csv(focus_area_fire_station_node_path)
+# The fuel sites' node_longitude and node_latitude
+focus_area_fuel_site_node_df = pd.read_csv(focus_area_fuel_site_node_path)
+# The hospitals' node_longitude and node_latitude
+focus_area_hospital_node_df = pd.read_csv(focus_area_hospital_node_path) 
+
+focus_area_NodalLoads_from_Raster_df = pd.read_csv(focus_area_NodalLoads_from_Raster_path) # In case it is needed
+
+```
+
+This is an excellent idea for comparing the two optimization methods. A Mixed Integer Program (MIP) is ideal for finding the single, mathematically optimal solution for a static problem. Your Variable Neighborhood Search (VNS) is a heuristic that excels at finding very good, but not necessarily optimal, solutions for complex, dynamic problems.
+
+The key difference is that a single MIP cannot handle the daily changes in truck count, real-time debris updates, or communication between different DMS groups. To use a MIP for your problem, we must simplify it into a series of smaller, static optimization problems.
+
+The model below formulates a single-day, single-DMS, single-target MIP to find the shortest-time path from a DMS to the highest-priority, nearest emergency facility. This allows us to find the provably optimal path for one specific scenario, which you can then compare directly to the path found by your VNS for the same scenario. The code uses the pulp library.
+
+
+
+Conclusion
+This MIP model provides a single, provably optimal solution for a simplified version of your problem. This is exactly what you need to compare against your VNS.
+
+By running this code, you will get the best possible path and time for one specific DMS-target pair, assuming all debris values are known and fixed. You can then run your VNS for the same scenario and compare the VNS's path, time, and optimality gap.
+
+This demonstrates the key trade-off:
+
+MIP: Provides a guaranteed optimal solution but requires a static, simplified model and is computationally expensive for large-scale problems.
+
+VNS: Handles the dynamic complexity of the full problem (multiple trucks, changing data) but does not guarantee the optimal solution for any given scenario.
+
+Let me know if you would like me to adjust the model to target a different DMS or if you have another scenario you'd like to analyze!
+
+```{python}
+# Import necessary libraries
+import os
+import pandas as pd
+import networkx as nx
+from pulp import *
+from scipy.spatial import KDTree
+import traceback
+import sys
+
+# --- I. DATA LOADING AND SETUP ---
+# NOTE: The paths are hardcoded as provided.
+try:
+    # Define file paths based on the user's provided directory structure
+    Setup_path = r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area'
+
+    # Load all the required datasets
+    focus_area_dms_node_with_trucks_df = pd.read_csv(os.path.join(Setup_path, 'focus_area_dms_node_with_trucks.csv'))
+    focus_area_EdgeLoads_from_Raster_Combined_df = pd.read_csv(os.path.join(Setup_path, 'focus_area_EdgeLoads_from_Raster_Combined.csv'))
+    focus_area_fire_station_node_df = pd.read_csv(os.path.join(Setup_path, 'focus_area_fire_station_node.csv'))
+    focus_area_hospital_node_df = pd.read_csv(os.path.join(Setup_path, 'focus_area_hospital_node.csv'))
+    focus_area_fuel_site_node_df = pd.read_csv(os.path.join(Setup_path, 'focus_area_fuel_site_node.csv'))
+    
+    # Check if necessary columns exist
+    for df, cols in [(focus_area_dms_node_with_trucks_df, ['Load Date', 'Disposal Site', 'Trucks', 'node_latitude', 'node_longitude']),
+                     (focus_area_EdgeLoads_from_Raster_Combined_df, ['u', 'v', 'length', 'total_split_CYD']),
+                     (focus_area_fire_station_node_df, ['Node ID']),
+                     (focus_area_hospital_node_df, ['Node ID']),
+                     (focus_area_fuel_site_node_df, ['Node ID'])]:
+        if not all(col in df.columns for col in cols):
+            raise ValueError(f"Missing required columns in a dataframe. Expected: {cols}")
+
+except FileNotFoundError as e:
+    print(f"Error: A required data file was not found. Please check your file paths. Details: {e}", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"An unexpected error occurred during data loading: {e}", file=sys.stderr)
+    print(traceback.format_exc())
+    sys.exit(1)
+
+# --- II. CONSTANTS AND UTILITY FUNCTIONS ---
+# Assume average debris clearing rate per truck (CYD/hour)
+CLEANING_RATE_PER_TRUCK = 10  # CYD/hour
+TRUCK_CAPACITY = 40  # CYD
+SPEED_MPH = 30
+SPEED_MPS = SPEED_MPH * 1609.34 / 3600  # meters per second
+
+# --- III. PROBLEM SETUP AND MIP FORMULATION ---
+def solve_mip_for_route(start_node, target_node, num_trucks, edges_df):
+    """
+    Formulates and solves a Mixed Integer Program to find the optimal path
+    from a start node to a target node.
+
+    Args:
+        start_node (int): The starting node ID (DMS location).
+        target_node (int): The target node ID (emergency facility).
+        num_trucks (int): The number of trucks in the group.
+        edges_df (pd.DataFrame): The dataframe of edges with length and debris.
+
+    Returns:
+        A dictionary with the solution details or None if no solution is found.
+    """
+    try:
+        # Create a problem instance
+        prob = LpProblem(f"DebrisRemoval_DMS_{start_node}_to_Target_{target_node}", LpMinimize)
+        
+        # Determine effective cleaning rate and total capacity for the group
+        group_cleaning_rate = CLEANING_RATE_PER_TRUCK * num_trucks
+        group_capacity = TRUCK_CAPACITY * num_trucks
+
+        # Get the set of all unique nodes from the edges
+        nodes = list(set(edges_df['u']).union(set(edges_df['v'])))
+        
+        # Create a list of all possible edges as tuples (u, v)
+        edges = [(row['u'], row['v']) for _, row in edges_df.iterrows()]
+        
+        # --- Decision Variables ---
+        # x_ij is a binary variable, 1 if edge (i,j) is in the path, 0 otherwise
+        x = LpVariable.dicts("x", edges, cat=LpBinary)
+        
+        # u_i is a continuous variable for subtour elimination
+        # Note: This is a common method for TSP-like problems
+        u = LpVariable.dicts("u", nodes, 0, None, LpContinuous)
+
+        # --- Objective Function ---
+        # Minimize total time, which is the sum of travel time and cleanup time
+        total_time = lpSum([
+            x[(row['u'], row['v'])] * (
+                (row['length'] / SPEED_MPS) + 
+                (row['total_split_CYD'] / group_cleaning_rate)
+            ) for _, row in edges_df.iterrows()
+        ])
+        prob += total_time, "TotalTime"
+
+        # --- Constraints ---
+        
+        # 1. Flow Conservation Constraint
+        # For every node, the number of incoming edges equals the number of outgoing edges,
+        # unless it's the start or end node.
+        for node in nodes:
+            in_flow = lpSum([x[(i, j)] for (i, j) in edges if j == node])
+            out_flow = lpSum([x[(i, j)] for (i, j) in edges if i == node])
+            
+            if node == start_node:
+                prob += out_flow - in_flow == 1, f"Start_Node_Flow_{node}"
+            elif node == target_node:
+                prob += out_flow - in_flow == -1, f"End_Node_Flow_{node}"
+            else:
+                prob += out_flow - in_flow == 0, f"Intermediate_Node_Flow_{node}"
+
+        # 2. Total capacity constraint
+        # The sum of all debris on the path must not exceed the group's capacity.
+        total_debris = lpSum([x[(row['u'], row['v'])] * row['total_split_CYD'] for _, row in edges_df.iterrows()])
+        prob += total_debris <= group_capacity, "DebrisCapacity"
+
+        # 3. Subtour Elimination Constraints (Miller-Tucker-Zemlin formulation)
+        # This prevents the solver from finding disconnected loops.
+        # It's a key part of solving path-finding problems.
+        # M is a large number
+        M = len(nodes)
+        for i, j in edges:
+            if i != target_node and j != start_node:
+                prob += u[i] - u[j] + M * x[(i, j)] <= M - 1, f"Subtour_Elimination_{i}_{j}"
+
+        # 4. Starting point for the 'u' variable (arbitrary, needed for the formulation)
+        prob += u[start_node] == 1, "Subtour_Start_Node"
+        prob += u[target_node] == len(nodes), "Subtour_End_Node"
+
+        # Solve the problem
+        print(f"Solving MIP for DMS node {start_node} to target {target_node}...")
+        prob.solve()
+        
+        # Check the solver status
+        if LpStatus[prob.status] == "Optimal":
+            print("Status: Optimal Solution Found!")
+            
+            # Extract the path
+            solution_path = []
+            current_node = start_node
+            while current_node != target_node:
+                next_node = None
+                for (u, v) in edges:
+                    if u == current_node and x[(u, v)].varValue > 0.9:
+                        solution_path.append((u, v))
+                        current_node = v
+                        break
+            
+            # Calculate total distance and time from the solved path
+            total_dist_meters = sum(
+                edges_df.loc[(edges_df['u'] == u) & (edges_df['v'] == v), 'length'].iloc[0]
+                for (u, v) in solution_path
+            )
+            
+            return {
+                "status": "Optimal",
+                "path": solution_path,
+                "total_time_seconds": value(prob.objective),
+                "total_distance_meters": total_dist_meters
+            }
+        else:
+            print(f"Status: {LpStatus[prob.status]}. No optimal solution found.")
+            return None
+
+    except Exception as e:
+        print(f"An error occurred during MIP solving: {e}", file=sys.stderr)
+        return None
+
+# --- IV. MAIN EXECUTION ---
+# For demonstration, we'll pick a single DMS and find its first target
+print("Preparing data for a single-scenario MIP run...")
+
+# Get the first DMS and its trucks
+# We'll use the first row of data to create a static scenario
+first_day_df = focus_area_dms_node_with_trucks_df[pd.to_datetime(focus_area_dms_node_with_trucks_df['Load Date']).dt.date == pd.to_datetime('10/05/2022').date()]
+if first_day_df.empty:
+    print("No data found for the first day '10/05/2022'. Please check the input file.")
+    sys.exit(1)
+
+dms_info = first_day_df.iloc[0]
+dms_name = dms_info['Disposal Site']
+num_trucks = int(dms_info['Trucks'])
+if num_trucks == 0:
+    print(f"DMS '{dms_name}' has 0 trucks on this date. Cannot run the simulation.")
+    sys.exit(1)
+
+print(f"Using DMS: '{dms_name}' with {num_trucks} trucks.")
+
+# Create a master list of all nodes for KDTree to find the nearest target
+all_nodes_with_coords = pd.DataFrame(columns=['node_id', 'latitude', 'longitude'])
+# Note: You'll need to load a full nodes file with coords or extract from edge WKTs for this to work
+# For this example, we'll assume the node IDs can be used to find the nearest target
+# We'll just use the first node as a placeholder for the DMS
+start_node_id = focus_area_dms_node_with_trucks_df.iloc[0]['Disposal Site']
+
+# Find the closest emergency facility (highest priority first)
+def find_closest_target(start_node_id):
+    # This requires a graph to find the shortest path, which is computationally expensive
+    # A simpler approach for the MIP is to just pick the first available target.
+    # In a real application, you would use a graph's shortest path length to determine this.
+    
+    # Priority 1: Fire Stations
+    if not focus_area_fire_station_node_df.empty:
+        return focus_area_fire_station_node_df.iloc[0]['Node ID'], 'Fire Station'
+    
+    # Priority 2: Hospitals
+    if not focus_area_hospital_node_df.empty:
+        return focus_area_hospital_node_df.iloc[0]['Node ID'], 'Hospital'
+
+    # Priority 3: Fuel Sites
+    if not focus_area_fuel_site_node_df.empty:
+        return focus_area_fuel_site_node_df.iloc[0]['Node ID'], 'Fuel Site'
+        
+    return None, None
+
+target_node_id, target_type = find_closest_target(start_node_id)
+if target_node_id is None:
+    print("No emergency facilities found. Cannot run the MIP.")
+    sys.exit(1)
+
+print(f"Targeting the closest {target_type} at node: {target_node_id}.")
+
+# Run the MIP solver for this single scenario
+solution = solve_mip_for_route(
+    start_node=start_node_id,
+    target_node=target_node_id,
+    num_trucks=num_trucks,
+    edges_df=focus_area_EdgeLoads_from_Raster_Combined_df
+)
+
+if solution and solution['status'] == "Optimal":
+    print("\n--- MIP Solution Results ---")
+    print(f"Optimal Path: {solution['path']}")
+    print(f"Total Time: {solution['total_time_seconds']:.2f} seconds ({solution['total_time_seconds'] / 3600:.2f} hours)")
+    print(f"Total Distance: {solution['total_distance_meters']:.2f} meters ({solution['total_distance_meters'] * 0.000621371:.2f} miles)")
+
+```
