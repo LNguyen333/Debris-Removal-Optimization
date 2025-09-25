@@ -1,0 +1,152 @@
+---
+title: "Debris Removal Process Setup Nodes and Edges"
+author: "Leanh Nguyen (Ln14)"
+
+date: 2025-03-27
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+  jupyter: python3
+---
+
+{{< pagebreak >}}
+
+# Setting Up Data
+
+Notes:
+- os.chdir(): changes the current working directory to a specific path
+- os.getcwd(): gets current working directory
+
+```python
+import requests
+import lkh
+import urllib3
+
+# This line disables the warning that will appear when you bypass SSL verification
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- Configuration ---
+# 1. Set the correct path to YOUR LKH-3 executable.
+solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+
+# 2. Get the problem from the web, bypassing SSL verification for this trusted site.
+print("Downloading VRP problem...")
+problem_str = requests.get(
+    'http://vrp.atd-lab.inf.puc-rio.br/media/com_vrp/instances/A/A-n32-k5.vrp', 
+    verify=False
+)
+# Check if the download was successful before proceeding
+problem_str.raise_for_status() 
+problem = lkh.LKHProblem.parse(problem_str.text)
+print("Problem loaded successfully.")
+
+# 3. Solve the problem and capture the result
+print("Starting solver...")
+try:
+    tours, cost = lkh.solve(solver_path, problem=problem, max_trials=10000, runs=10)
+
+    # # 4. Print the final solution
+    # print("\n--- Solver Finished ---")
+    # print(f"✅ Success! Found a solution with cost: {cost}")
+    # print("Vehicle Routes:")
+    # for i, tour in enumerate(tours):
+    #     route_str = " -> ".join(map(str, tour))
+    #     print(f"  Vehicle {i+1}: Depot -> {route_str} -> Depot")
+except Exception as e:
+    print(f"\n--- 🛑 Solver Failed ---")
+    # print(f"Error: {e}")
+
+```
+
+```{python}
+import lkh
+
+# 1. Define the path to your LKH-3 executable.
+# Using a raw string (r"...") is a good practice for Windows paths.
+solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+
+# 2. Define the path to your VRP problem file.
+problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
+
+# 3. Read the problem file from your local disk.
+with open(problem_file_path, 'r') as f:
+    problem_str = f.read()
+
+# 4. Parse the problem string into an LKHProblem object.
+problem = lkh.LKHProblem.parse(problem_str)
+
+# 5. Run the solver.
+# The summary statistics you requested will be printed directly to the console by LKH-3.
+print("--- Starting LKH-3 Solver ---")
+
+# The PyLKH wrapper executes the LKH-3 solver, which then prints its own summary table.
+# This call will produce the output you're looking for.
+solution=lkh.solve(solver_path, problem=problem, max_trials=100, runs=10)
+print(solution)
+print("\n--- Solver Finished ---")
+```
+
+```{python}
+try:
+    # **CORRECTION HERE**
+    # Unpack the result into two variables: tours and cost
+    # Increased max_trials to get a better solution
+    tours, cost = lkh.solve(solver_path, problem=problem, max_trials=10000, runs=10)
+
+    # --- Print and Analyze the Solution ---
+    print("\n--- Solver Finished ---")
+    print(f"✅ Success! Found a solution.")
+    
+    # print("\n--- VEHICLE ROUTES ---")
+    # for i, tour in enumerate(tours):
+    #     route_str = " -> ".join(map(str, tour))
+    #     print(f"  Vehicle {i+1}: Depot -> {route_str} -> Depot")
+        
+    print("\n--- COST ANALYSIS ---")
+    print(f"Solution Cost: {cost}")
+    print(f"Best Known Solution (BKS): {BKS}")
+    
+    # # Calculate the Gap Percentage
+    # gap = ((cost - BKS) / BKS) * 100
+    # print(f"Gap: {gap:.2f}%")
+
+    # if gap == 0.0:
+    #     print("Excellent! Your solution matches the Best Known Solution.")
+    # else:
+    #     print("Your solution is suboptimal. Try increasing max_trials or runs.")
+
+except ValueError:
+    print("\n--- 🛑 Solver Failed ---")
+    print("The solver did not return a valid solution (tours, cost).")
+    print("This often happens if 'max_trials' is too low for the solver to find a feasible route.")
+
+```
+
+
+
+
+
