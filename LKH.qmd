@@ -37,153 +37,16 @@ execute:
 
 # Setting Up Data
 
-Notes:
-- os.chdir(): changes the current working directory to a specific path
-- os.getcwd(): gets current working directory
-
-```{python}
-import subprocess
-from lkh import LKHProblem
-
-# 1. Define paths as before
-solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
-
-# 2. Read and parse the problem as before
-print("--- Preparing problem files ---")
-with open(problem_file_path, 'r') as f:
-    problem_str = f.read()
-problem = LKHProblem.parse(problem_str)
-
-# Add solver parameters here
-params = {
-    'MAX_TRIALS': 10000, # Using a larger number to ensure a solution is found
-    'RUNS': 10
-}
-
-# 3. This block creates the temporary files LKH needs
-#    and then we run the solver manually to capture ALL output.
-try:
-    with problem.to_files(**params) as (p_file, par_file):
-        print(f"Generated temporary problem file: {p_file.name}")
-        print(f"Generated temporary parameter file: {par_file.name}")
-        
-        command = [solver_path, par_file.name]
-        print(f"Running command: {' '.join(command)}")
-
-        # Run the command and capture output without crashing on failure
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False # IMPORTANT: This prevents a crash on non-zero exit codes
-        )
-
-        print("\n--- RAW SOLVER OUTPUT (STDOUT) ---")
-        print(result.stdout if result.stdout else "[No standard output]")
-        print("\n--- RAW SOLVER ERRORS (STDERR) ---")
-        print(result.stderr if result.stderr else "[No standard error output]")
-
-except Exception as e:
-    print(f"\n--- A PYTHON ERROR OCCURRED ---")
-    print(f"The script failed before running the solver. Error: {e}")
-
-print("\n--- Debugging Script Finished ---")
-```
 
 ```{python}
 import lkh
-import subprocess
-
-#  1. Define paths as before
-solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
-
-# 2. Read and parse the problem as before
-with open(problem_file_path, 'r') as f:
-    problem_str = f.read()
-problem = lkh.LKHProblem.parse(problem_str)
-
-# 3. Run the solver and handle the result correctly
-print("--- Starting LKH-3 Solver ---")
-try:
-    # lkh.solve returns a tuple: (list_of_tours, total_cost)
-    # We unpack it directly into two variables.
-    tours, cost = lkh.solve(
-        solver_path, 
-        problem=problem, 
-        max_trials=100, 
-        runs=10
-    )
-    # Next, CHECK if the result is what you expect BEFORE unpacking
-    if isinstance(result, tuple) and len(result) == 2:
-        tours, cost = result  # Unpack only if it's safe
-        print("--- Solver Succeeded ---")
-        print(f"Best cost found: {cost}")
-        print("Vehicle tours:")
-        for i, tour in enumerate(tours):
-            print(f"  Vehicle {i+1}: {tour}")
-    else:
-        # If the result is not a 2-item tuple, the solver failed
-        print("--- Solver Finished Without a Solution ---")
-        print("This is likely because max_trials or other parameters were too restrictive.")
-        print(f"The unexpected value returned by lkh.solve was: {result}")
-
-except subprocess.CalledProcessError as e:
-    print("--- Solver Crashed ---")
-    print("The LKH-3 executable returned an error. Here is its full output:")
-    print(e.output)
-except Exception as e:
-    print(f"An unexpected Python error occurred: {e}")
-
-print("\n--- Script Finished ---")
-
-
-
-#     # If successful, print the solution you received.
-#     print("--- Solver Succeeded ---")
-#     print(f"Best cost found: {cost}")
-#     print("Vehicle tours:")
-#     for i, tour in enumerate(tours):
-#         print(f"  Vehicle {i+1}: {tour}")
-
-# except subprocess.CalledProcessError as e:
-#     # If the solver fails, this block will show you the full error output
-#     print("--- Solver Failed ---")
-#     print("The LKH-3 executable returned an error. Here is its full output:")
-#     print(e.output)
-# except Exception as e:
-#     # Catch any other potential errors
-#     print(f"An unexpected error occurred: {e}")
-
-
-# print("\n--- Script Finished ---")
-```
-
-```{python}
-import lkh
-import os
-import sys
-
-# --- 1. Define File Paths ---
-
-# The full path to your LKH-3 executable
-# NOTE: Using a raw string (r"...") to handle backslashes easily
-solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-
-# The full path to your local VRP problem file
-# vrp_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
-
 # 1. Define the path to your LKH-3 executable.
 # Using a raw string (r"...") is a good practice for Windows paths.
-# solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
 
 # 2. Define the path to your VRP problem file.
 problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
-```
 
-
-```{python}
 # 3. Read the problem file from your local disk.
 with open(problem_file_path, 'r') as f:
     problem_str = f.read()
@@ -191,82 +54,43 @@ with open(problem_file_path, 'r') as f:
 # 4. Parse the problem string into an LKHProblem object.
 problem = lkh.LKHProblem.parse(problem_str)
 
-# 5. Run the solver and print the output to the console.
+# Now, inspect its attributes
+print(f"Problem Name: {problem.name}")
+print(f"Problem Type: {problem.type}")
+print(f"Number of Locations (Dimension): {problem.dimension}")
+print(f"Vehicle Capacity: {problem.capacity}")
+print(f"Number of Vehicles/Salesmen (if specified): {problem.salesmen}")
+# You can also access the demands for each customer
+# problem.demands is a dictionary like {node_id: demand_amount}
+print("\nCustomer Demands:")
+for customer_id, demand in problem.demands.items():
+    if demand > 0: # Don't print the depot's demand
+        print(f"  Customer {customer_id}: needs {demand} units")
+
+
+# 5. Run the solver.
 # The summary statistics you requested will be printed directly to the console by LKH-3.
-print("--- Starting LKH-3 Solver ---")
+print("Starting LKH-3 Solver")
 
 # The PyLKH wrapper executes the LKH-3 solver, which then prints its own summary table.
 # This call will produce the output you're looking for.
-# By adding log_file=sys.stdout, you are telling PyLKH to print
-# the LKH-3 program's output directly to your terminal.
-lkh.solve(
-    solver_path, 
-    problem=problem, 
-    max_trials=10000, 
-    runs=10,
-    log_file=sys.stdout  # <-- Add this line
-)
+result = lkh.solve(solver_path, problem=problem, max_trials=100, runs=10)
+print(f"Result type: {type(result)}")
+print(f"Result: {result}")
+print(f"Length of result: {len(result) if hasattr(result, '__len__') else 'Not a sequence'}")
 
-print("\n--- Solver Finished ---")
-```
-
-
-
-
-
-
-```{python}
-
-# --- 2. Load the Problem File ---
-
-# The pylkh library expects the problem content as a string.
-try:
-    with open(vrp_file_path, 'r') as f:
-        problem_str = f.read()
-
-    # Parse the VRP string content into an LKHProblem object
-    problem = lkh.LKHProblem.parse(problem_str)
-
-except FileNotFoundError:
-    print(f"Error: VRP file not found at path: {vrp_file_path}")
-    # Handle the error, maybe exit or return
-    exit()
-
-# --- 3. Solve the Problem ---
-
-print("Starting LKH-3 solver...")
-print(f"Using executable: {solver_path}")
-print(f"Solving problem: {os.path.basename(vrp_file_path)}")
-
-# Call the lkh.solve function
-# - solver_path: The location of your LKH-3.exe
-# - problem: The parsed LKHProblem object
-# - max_trials and runs are optional parameters to control solution quality/time
-solution = lkh.solve(
-    solver_path,
-    problem=problem,
-    max_trials=10000,  # A setting for the internal LKH algorithm
-    runs=10            # How many independent runs to execute
-)
-
-# --- 4. Process and Display Results ---
-
-# Check if the result is a list (because runs > 1) or a single object (runs = 1)
-if isinstance(solution, list):
-    # Find the solution object with the minimum cost
-    best_solution = min(solution, key=lambda s: s.cost)
-    print(f"LKH completed {len(solution)} runs.")
+# Now let's properly unpack based on what we found
+if len(result) == 2:
+    tours, cost = result
+elif len(result) == 3:
+    tours, cost, extra = result
+    print(f"Extra value: {extra}")
 else:
-    # If runs was 1, 'solution' is already the best_solution object
-    best_solution = solution
+    print(f"Unexpected number of return values: {len(result)}")
+    tours = result[0] if len(result) > 0 else None
+    cost = result[1] if len(result) > 1 else None
 
-# Now you can safely access the 'cost' and 'tours' attributes on the best_solution object
-print("\n--- Solution Found ---")
-print(f"Optimal Tour Length: {best_solution.cost}")
-
-# The best_solution.tours is a list of routes (lists of node IDs)
-for i, tour in enumerate(best_solution.tours):
-    # Node IDs in TSPLIB/VRP typically start at 1.
-    print(f"Vehicle {i+1} Tour (Nodes): {tour}")
+print(f"The solver found a solution with a total cost of {cost}.")
+print("\nSolver Finished")
 
 ```

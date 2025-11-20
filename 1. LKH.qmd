@@ -41,6 +41,251 @@ Notes:
 - os.chdir(): changes the current working directory to a specific path
 - os.getcwd(): gets current working directory
 
+```{python}
+import lkh
+import time
+
+# 1. SETUP PATHS
+# We use 'r' before the string to indicate a "raw string".
+# This prevents Windows backslashes from being interpreted as escape characters.
+solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
+
+# 2. LOAD THE PROBLEM DATA
+# Open the local .vrp file and read its text content into a variable.
+with open(problem_file_path, 'r') as file:
+    problem_data = file.read()
+
+# 3. PARSE THE PROBLEM
+# Convert the text string into an object LKH can understand.
+problem = lkh.LKHProblem.parse(problem_data)
+
+# 4. SOLVE THE PROBLEM
+print("--- Starting LKH-3 Optimization ---")
+
+# Capture the specific time right before the solver starts
+start_time = time.time()
+
+# Run the solver.
+# max_trials: How many iterations to try improving the solution (higher = better result but slower).
+# runs: How many times to restart the solver completely (helps avoid getting stuck in local optima).
+routes = lkh.solve(solver_path, problem=problem, max_trials=1000, runs=1)
+
+# Capture the time right after the solver finishes
+end_time = time.time()
+
+# 5. OUTPUT RESULTS
+print("\n--- Optimization Complete ---")
+
+# Calculate total program runtime
+runtime_seconds = end_time - start_time
+print(f"Total Program Runtime: {runtime_seconds:.4f} seconds")
+
+# Print the resulting routes
+# The output is a list of lists. Each inner list is a route for one vehicle.
+print(f"Best Routes Found: {routes}")
+
+# 6. CALCULATE DISTANCE AND TIME (Conceptual)
+# LKH optimizes for 'Cost', which is usually Euclidean distance in VRP files.
+# Note: PyLKH returns the path, but usually prints the Cost to the console logs during execution.
+# Here is how you would conceptually calculate time if you have a speed.
+
+# Example assumptions:
+# Total Distance (Cost) needs to be read from the LKH console output (look for "Cost: <number>")
+# or calculated by summing distances between the nodes in 'routes'.
+assumed_speed = 40  # Example: 40 units of distance per hour
+print(f"\n--- Time Calculation (Example) ---")
+print(f"To get travel time, divide the Total Cost (Distance) by your vehicle speed ({assumed_speed} units/hr).")
+print("Formula: Time = Total Distance / Speed")
+```
+
+```{python}
+import math
+
+VEHICLE_SPEED = 40  # Speed in "Distance Units per Hour" (e.g., 40 mph)
+
+# --- HELPER FUNCTION: PARSE COORDINATES ---
+def get_node_coords(file_content):
+    """
+    Reads the VRP string and creates a dictionary of coordinates.
+    Example: {1: (30, 40), 2: (33, 45), ...}
+    """
+    coords = {}
+    lines = file_content.splitlines()
+    reading_nodes = False
+    
+    for line in lines:
+        if "NODE_COORD_SECTION" in line:
+            reading_nodes = True
+            continue
+        if "DEMAND_SECTION" in line or "DEPOT_SECTION" in line:
+            reading_nodes = False
+            break
+        
+        if reading_nodes:
+            parts = line.strip().split()
+            if len(parts) >= 3:
+                node_id = int(parts[0])
+                x = float(parts[1])
+                y = float(parts[2])
+                coords[node_id] = (x, y)
+    return coords
+
+# --- HELPER FUNCTION: CALCULATE EUCLIDEAN DISTANCE ---
+def calculate_route_distance(route, coords):
+    """Calculates the total distance of a single route (Vehicle path)"""
+    total_dist = 0.0
+    # Iterate through the nodes in the route
+    for i in range(len(route) - 1):
+        node_a = route[i]
+        node_b = route[i+1]
+        
+        # Get (x,y) for both nodes
+        xa, ya = coords[node_a]
+        xb, yb = coords[node_b]
+        
+        # Euclidean Distance Formula: sqrt((x2-x1)^2 + (y2-y1)^2)
+        dist = math.sqrt((xb - xa)**2 + (yb - ya)**2)
+        total_dist += dist
+        
+    return total_dist
+
+# --- MAIN EXECUTION ---
+
+# 1. Load and Parse
+with open(problem_file_path, 'r') as file:
+    problem_data = file.read()
+
+problem = lkh.LKHProblem.parse(problem_data)
+node_coords = get_node_coords(problem_data) # Extract coordinates for our math later
+
+# 2. Run LKH
+print("Running LKH Solver...")
+# We use 'runs=1' for speed testing, but 'runs=10' is better for accuracy
+routes = lkh.solve(solver_path, problem=problem, max_trials=1000, runs=1)
+
+# 3. Calculate Metrics
+total_distance = 0
+
+print(f"\n--- Detailed Route Statistics ---")
+for i, route in enumerate(routes):
+    # Calculate distance for this specific vehicle
+    r_dist = calculate_route_distance(route, node_coords)
+    total_distance += r_dist
+    
+    print(f"Vehicle {i+1} Route: {route}")
+    print(f"   -> Distance: {r_dist:.2f} units")
+
+# 4. Final Time Calculation
+# Time = Distance / Speed
+total_time = total_distance / VEHICLE_SPEED
+
+print("-" * 30)
+print(f"Total Distance: {total_distance:.2f} units")
+print(f"Assumed Speed:  {VEHICLE_SPEED} units/hour")
+print(f"Total Travel Time: {total_time:.4f} hours")
+print("-" * 30)
+```
+
+```{python}
+import matplotlib.pyplot as plt
+
+# --- 1. DATA SETUP ---
+# Path to your VRP file (to get coordinates)
+
+# The results you got from your previous run
+my_routes = [
+    [11, 26, 6, 21], 
+    [27, 8, 14, 18, 20, 32, 22], 
+    [7, 4, 3, 24, 5, 12, 29, 15], 
+    [25, 28], 
+    [13, 2, 17, 31], 
+    [30, 19, 9, 10, 23, 16]
+]
+
+# --- 2. HELPER: READ COORDINATES ---
+def get_node_coords(path):
+    coords = {}
+    with open(path, 'r') as f:
+        lines = f.read().splitlines()
+        
+    reading_nodes = False
+    for line in lines:
+        if "NODE_COORD_SECTION" in line:
+            reading_nodes = True
+            continue
+        if "DEMAND_SECTION" in line or "DEPOT_SECTION" in line:
+            break
+        
+        if reading_nodes:
+            parts = line.strip().split()
+            if len(parts) >= 3:
+                # Format: ID X Y
+                coords[int(parts[0])] = (float(parts[1]), float(parts[2]))
+    return coords
+
+# --- 3. PLOTTING LOGIC ---
+def plot_routes(coords, routes):
+    plt.figure(figsize=(10, 8))
+    
+    # Plot the Depot (Node 1) distinctly
+    depot_x, depot_y = coords[1]
+    plt.plot(depot_x, depot_y, 'rs', markersize=10, label='Depot (Node 1)')
+    
+    # Colors for different vehicles
+    colors = ['blue', 'green', 'red', 'cyan', 'magenta', 'orange', 'black']
+    
+    for i, route in enumerate(routes):
+        # The route usually excludes the depot start/end, so we add it manually for drawing
+        full_route = [1] + route + [1]
+        
+        # Extract X and Y coordinates for this route
+        x_vals = []
+        y_vals = []
+        for node_id in full_route:
+            x_vals.append(coords[node_id][0])
+            y_vals.append(coords[node_id][1])
+            
+        # Plot the path line
+        c = colors[i % len(colors)] # Cycle through colors
+        plt.plot(x_vals, y_vals, marker='o', linestyle='-', color=c, label=f'Vehicle {i+1}')
+        
+        # Annotate the node numbers on the graph
+        for node_id in route:
+            nx, ny = coords[node_id]
+            plt.text(nx, ny + 1, str(node_id), fontsize=9, ha='center')
+
+    plt.title(f"VRP Solution Visualization ({len(routes)} Vehicles)")
+    plt.xlabel("X Coordinate")
+    plt.ylabel("Y Coordinate")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+# --- 4. EXECUTE ---
+coords = get_node_coords(problem_file_path)
+plot_routes(coords, my_routes)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ```python
 import requests
 import lkh
@@ -82,7 +327,11 @@ except Exception as e:
 
 ```
 
-```{python}
+
+
+
+
+```python
 import lkh
 
 # 1. Define the path to your LKH-3 executable.
@@ -110,7 +359,7 @@ print(solution)
 print("\n--- Solver Finished ---")
 ```
 
-```{python}
+```python
 try:
     # **CORRECTION HERE**
     # Unpack the result into two variables: tours and cost
