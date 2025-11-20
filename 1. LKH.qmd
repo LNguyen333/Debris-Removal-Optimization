@@ -69,7 +69,7 @@ start_time = time.time()
 # Run the solver.
 # max_trials: How many iterations to try improving the solution (higher = better result but slower).
 # runs: How many times to restart the solver completely (helps avoid getting stuck in local optima).
-routes = lkh.solve(solver_path, problem=problem, max_trials=1000, runs=1)
+routes = lkh.solve(solver_path, problem=problem, max_trials=10000, runs=1, vehicles=5)
 
 # Capture the time right after the solver finishes
 end_time = time.time()
