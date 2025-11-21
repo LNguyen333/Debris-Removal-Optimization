@@ -1,5 +1,5 @@
 ---
-title: "Debris Removal Process Setup Nodes and Edges"
+title: "Debris Removal Optimization LKH"
 author: "Leanh Nguyen (Ln14)"
 
 date: 2025-03-27
@@ -42,73 +42,62 @@ Notes:
 - os.getcwd(): gets current working directory
 
 ```{python}
+import itertools # Used to create the pairs for the background network
 import lkh
+import math
+import matplotlib.pyplot as plt
 import time
 
 # 1. SETUP PATHS
-# We use 'r' before the string to indicate a "raw string".
-# This prevents Windows backslashes from being interpreted as escape characters.
 solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
 problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
 
 # 2. LOAD THE PROBLEM DATA
-# Open the local .vrp file and read its text content into a variable.
+# Open the local .vrp file and read its text content into a variable
 with open(problem_file_path, 'r') as file:
     problem_data = file.read()
 
 # 3. PARSE THE PROBLEM
-# Convert the text string into an object LKH can understand.
+# Convert the text string into an object LKH can understand
 problem = lkh.LKHProblem.parse(problem_data)
 
 # 4. SOLVE THE PROBLEM
-print("--- Starting LKH-3 Optimization ---")
+print("Starting LKH-3 Optimization")
 
-# Capture the specific time right before the solver starts
+# Capture the time before the solver starts
 start_time = time.time()
 
-# Run the solver.
-# max_trials: How many iterations to try improving the solution (higher = better result but slower).
-# runs: How many times to restart the solver completely (helps avoid getting stuck in local optima).
-routes = lkh.solve(solver_path, problem=problem, max_trials=10000, runs=1, vehicles=5)
+# Run the solver
+    # max_trials: How many iterations to try improving the solution (higher = better result but slower)
+    # runs: How many times to restart the solver completely (helps avoid getting stuck in local optima)
+    # vehicles: How many vehicles allowed
+routes = lkh.solve(solver_path, problem=problem, max_trials=10000, runs=10, vehicles=5)
 
-# Capture the time right after the solver finishes
+# Capture the time after the solver finishes
 end_time = time.time()
 
 # 5. OUTPUT RESULTS
-print("\n--- Optimization Complete ---")
+print("\nOptimization Complete")
 
 # Calculate total program runtime
 runtime_seconds = end_time - start_time
 print(f"Total Program Runtime: {runtime_seconds:.4f} seconds")
 
 # Print the resulting routes
-# The output is a list of lists. Each inner list is a route for one vehicle.
+# The output is a list of lists. Each inner list is a route for one vehicle
 print(f"Best Routes Found: {routes}")
-
-# 6. CALCULATE DISTANCE AND TIME (Conceptual)
-# LKH optimizes for 'Cost', which is usually Euclidean distance in VRP files.
-# Note: PyLKH returns the path, but usually prints the Cost to the console logs during execution.
-# Here is how you would conceptually calculate time if you have a speed.
-
-# Example assumptions:
-# Total Distance (Cost) needs to be read from the LKH console output (look for "Cost: <number>")
-# or calculated by summing distances between the nodes in 'routes'.
-assumed_speed = 40  # Example: 40 units of distance per hour
-print(f"\n--- Time Calculation (Example) ---")
-print(f"To get travel time, divide the Total Cost (Distance) by your vehicle speed ({assumed_speed} units/hr).")
-print("Formula: Time = Total Distance / Speed")
 ```
 
 ```{python}
-import math
-
+# 6. CALCULATE DISTANCE AND TIME (Conceptual)
+# LKH optimizes for 'Cost', which is usually Euclidean distance in VRP files.
+# Note: PyLKH returns the path, but usually prints the Cost to the console logs during execution.
 VEHICLE_SPEED = 40  # Speed in "Distance Units per Hour" (e.g., 40 mph)
 
-# --- HELPER FUNCTION: PARSE COORDINATES ---
+# PARSE COORDINATES
 def get_node_coords(file_content):
     """
     Reads the VRP string and creates a dictionary of coordinates.
-    Example: {1: (30, 40), 2: (33, 45), ...}
     """
     coords = {}
     lines = file_content.splitlines()
@@ -131,7 +120,7 @@ def get_node_coords(file_content):
                 coords[node_id] = (x, y)
     return coords
 
-# --- HELPER FUNCTION: CALCULATE EUCLIDEAN DISTANCE ---
+# CALCULATE EUCLIDEAN DISTANCE
 def calculate_route_distance(route, coords):
     """Calculates the total distance of a single route (Vehicle path)"""
     total_dist = 0.0
@@ -150,24 +139,14 @@ def calculate_route_distance(route, coords):
         
     return total_dist
 
-# --- MAIN EXECUTION ---
+# MAIN EXECUTION
 
-# 1. Load and Parse
-with open(problem_file_path, 'r') as file:
-    problem_data = file.read()
-
-problem = lkh.LKHProblem.parse(problem_data)
 node_coords = get_node_coords(problem_data) # Extract coordinates for our math later
-
-# 2. Run LKH
-print("Running LKH Solver...")
-# We use 'runs=1' for speed testing, but 'runs=10' is better for accuracy
-routes = lkh.solve(solver_path, problem=problem, max_trials=1000, runs=1)
 
 # 3. Calculate Metrics
 total_distance = 0
 
-print(f"\n--- Detailed Route Statistics ---")
+print(f"\nRoute Statistics")
 for i, route in enumerate(routes):
     # Calculate distance for this specific vehicle
     r_dist = calculate_route_distance(route, node_coords)
@@ -180,94 +159,270 @@ for i, route in enumerate(routes):
 # Time = Distance / Speed
 total_time = total_distance / VEHICLE_SPEED
 
-print("-" * 30)
+print("-" * 40)
 print(f"Total Distance: {total_distance:.2f} units")
 print(f"Assumed Speed:  {VEHICLE_SPEED} units/hour")
 print(f"Total Travel Time: {total_time:.4f} hours")
-print("-" * 30)
+print("-" * 40)
 ```
 
 ```{python}
-import matplotlib.pyplot as plt
-
-# --- 1. DATA SETUP ---
-# Path to your VRP file (to get coordinates)
-
-# The results you got from your previous run
-my_routes = [
-    [11, 26, 6, 21], 
-    [27, 8, 14, 18, 20, 32, 22], 
-    [7, 4, 3, 24, 5, 12, 29, 15], 
-    [25, 28], 
-    [13, 2, 17, 31], 
-    [30, 19, 9, 10, 23, 16]
-]
-
-# --- 2. HELPER: READ COORDINATES ---
-def get_node_coords(path):
-    coords = {}
-    with open(path, 'r') as f:
-        lines = f.read().splitlines()
-        
-    reading_nodes = False
-    for line in lines:
-        if "NODE_COORD_SECTION" in line:
-            reading_nodes = True
-            continue
-        if "DEMAND_SECTION" in line or "DEPOT_SECTION" in line:
-            break
-        
-        if reading_nodes:
-            parts = line.strip().split()
-            if len(parts) >= 3:
-                # Format: ID X Y
-                coords[int(parts[0])] = (float(parts[1]), float(parts[2]))
-    return coords
-
-# --- 3. PLOTTING LOGIC ---
-def plot_routes(coords, routes):
-    plt.figure(figsize=(10, 8))
+# PLOTTING FUNCTION (UPDATED)
+def plot_solution(coords, routes):
+    plt.figure(figsize=(12, 10))
     
-    # Plot the Depot (Node 1) distinctly
+    # A. DRAW THE NETWORK BACKGROUND (The "Potential" Paths)
+    # create a line between every possible pair of nodes
+    node_ids = list(coords.keys())
+    # itertools.combinations creates unique pairs: (1,2), (1,3)...
+    pairs = list(itertools.combinations(node_ids, 2))
+    
+    print(f"Drawing {len(pairs)} background network edges...")
+    
+    for n1, n2 in pairs:
+        x_values = [coords[n1][0], coords[n2][0]]
+        y_values = [coords[n1][1], coords[n2][1]]
+        # zorder=0 pushes it to the back
+        # alpha=0.1 makes it very faint (10% opacity)
+        plt.plot(x_values, y_values, color='gray', linewidth=0.5, alpha=0.15, zorder=0)
+
+    # B. DRAW THE ACTUAL ROUTES (The "Selected" Paths)
+    colors = ['blue', 'green', 'red', 'purple', 'orange', 'cyan']
     depot_x, depot_y = coords[1]
-    plt.plot(depot_x, depot_y, 'rs', markersize=10, label='Depot (Node 1)')
     
-    # Colors for different vehicles
-    colors = ['blue', 'green', 'red', 'cyan', 'magenta', 'orange', 'black']
+    # Plot Depot
+    plt.plot(depot_x, depot_y, 'sk', markersize=12, label='Depot', zorder=10)
     
     for i, route in enumerate(routes):
-        # The route usually excludes the depot start/end, so we add it manually for drawing
+        if not route: continue # Skip empty routes
+        
+        # Construct full path for plotting: Depot -> Nodes -> Depot
         full_route = [1] + route + [1]
         
-        # Extract X and Y coordinates for this route
-        x_vals = []
-        y_vals = []
-        for node_id in full_route:
-            x_vals.append(coords[node_id][0])
-            y_vals.append(coords[node_id][1])
-            
-        # Plot the path line
-        c = colors[i % len(colors)] # Cycle through colors
-        plt.plot(x_vals, y_vals, marker='o', linestyle='-', color=c, label=f'Vehicle {i+1}')
+        route_x = [coords[n][0] for n in full_route]
+        route_y = [coords[n][1] for n in full_route]
         
-        # Annotate the node numbers on the graph
+        c = colors[i % len(colors)]
+        
+        # Plot the Line (zorder=5 ensures it sits on top of the grey background)
+        plt.plot(route_x, route_y, marker='o', linestyle='-', linewidth=2, 
+                 color=c, label=f'Vehicle {i+1}', zorder=5)
+        
+        # Annotate Node IDs (skip depot 1 to avoid clutter)
         for node_id in route:
-            nx, ny = coords[node_id]
-            plt.text(nx, ny + 1, str(node_id), fontsize=9, ha='center')
+            plt.text(coords[node_id][0], coords[node_id][1] + 1, str(node_id), 
+                     fontsize=10, ha='center', zorder=6, fontweight='bold')
 
-    plt.title(f"VRP Solution Visualization ({len(routes)} Vehicles)")
+    plt.title("VRP Optimization: Routes vs. Network Potential")
     plt.xlabel("X Coordinate")
     plt.ylabel("Y Coordinate")
     plt.legend()
-    plt.grid(True)
+    plt.grid(True, alpha=0.3)
     plt.show()
 
-# --- 4. EXECUTE ---
-coords = get_node_coords(problem_file_path)
-plot_routes(coords, my_routes)
+
+coords = get_node_coords(problem_data)
+
+# Remove empty lists just in case
+routes = [r for r in routes if r]
+
+# Plot
+plot_solution(coords, routes)
 ```
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+# --- 1. CONFIGURATION ---
+# Paths
+vrp_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
+tour_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\TOURS\Augerat_A\A-n32-k5.784.tour"
+lkh_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+
+# Problem Specifics
+DIMENSION = 32  # The number of real nodes in A-n32-k5 (from the filename)
+
+# --- 2. HELPER: PARSE THE .TOUR FILE ---
+def parse_solution_file(filepath, dimension):
+    """
+    Reads a TSPLIB .tour file and converts it to a list of routes.
+    Handles 'Dummy Depots' (nodes > dimension).
+    """
+    with open(filepath, 'r') as f:
+        lines = f.read().splitlines()
+    
+    raw_tour = []
+    reading = False
+    
+    # Extract the raw sequence of numbers
+    for line in lines:
+        if "TOUR_SECTION" in line:
+            reading = True
+            continue
+        if "-1" in line or "EOF" in line:
+            break
+        if reading:
+            val = int(line.strip())
+            raw_tour.append(val)
+
+    # Convert sequence to Routes
+    # Logic: Any node ID > Dimension, or Node 1, indicates a return to depot/split.
+    routes = []
+    current_route = []
+    
+    for node in raw_tour:
+        is_depot = (node == 1)
+        is_dummy = (node > dimension) # Nodes 33, 34, 35, 36 are dummy depots
+        
+        if is_depot or is_dummy:
+            if current_route:
+                routes.append(current_route)
+                current_route = []
+        else:
+            current_route.append(node)
+            
+    # Catch trailing route if exists
+    if current_route:
+        routes.append(current_route)
+        
+    return routes
+
+# --- 3. HELPER: CALCULATE DISTANCE ---
+def get_coords_and_dist(vrp_content, routes):
+    # 1. Parse Coords
+    coords = {}
+    lines = vrp_content.splitlines()
+    reading = False
+    for line in lines:
+        if "NODE_COORD_SECTION" in line:
+            reading = True; continue
+        if "DEMAND_SECTION" in line: break
+        if reading:
+            parts = line.split()
+            if len(parts) >= 3:
+                coords[int(parts[0])] = (float(parts[1]), float(parts[2]))
+
+    # 2. Calculate Total Distance
+    total_dist = 0
+    for route in routes:
+        full_path = [1] + route + [1] # Add depot (1) to start and end
+        for i in range(len(full_path)-1):
+            n1, n2 = full_path[i], full_path[i+1]
+            dist = math.sqrt((coords[n1][0]-coords[n2][0])**2 + (coords[n1][1]-coords[n2][1])**2)
+            total_dist += dist
+            
+    return total_dist
+
+# --- 4. MAIN EXECUTION ---
+
+# A. Run YOUR Solver
+print("--- Running Your Solver ---")
+with open(vrp_file_path, 'r') as f:
+    problem_data = f.read()
+problem = lkh.LKHProblem.parse(problem_data)
+# Force 5 vehicles to match the solution file
+my_routes = lkh.solve(lkh_path, problem=problem, max_trials=10000, runs=10, vehicles=5)
+
+# B. Parse the REFERENCE Solution (.tour file)
+print("--- Reading Reference Solution ---")
+reference_routes = parse_solution_file(tour_file_path, DIMENSION)
+
+# C. Compare
+print("\n" + "="*40)
+print("COMPARISON REPORT")
+print("="*40)
+
+# Calculate Distances
+my_dist = get_coords_and_dist(problem_data, my_routes)
+ref_dist = get_coords_and_dist(problem_data, reference_routes)
+
+print(f"My Calculated Distance:  {my_dist:.2f}")
+print(f"Reference File Distance: {ref_dist:.2f}")
+print(f"Difference:              {abs(my_dist - ref_dist):.2f}")
+
+print("\n--- Route Content Comparison ---")
+# We sort the routes by their first node to make visual comparison easier
+my_routes_sorted = sorted(my_routes, key=lambda x: x[0])
+ref_routes_sorted = sorted(reference_routes, key=lambda x: x[0])
+
+print(f"{'MY ROUTES':<50} | {'REFERENCE ROUTES'}")
+print("-" * 100)
+
+# Loop through the maximum number of routes to print side-by-side
+max_len = max(len(my_routes_sorted), len(ref_routes_sorted))
+for i in range(max_len):
+    mine = str(my_routes_sorted[i]) if i < len(my_routes_sorted) else "---"
+    ref = str(ref_routes_sorted[i]) if i < len(ref_routes_sorted) else "---"
+    
+    # Check if they are identical (ignoring reverse order)
+    is_match = "MISMATCH"
+    if i < len(my_routes_sorted) and i < len(ref_routes_sorted):
+        # Check exact match or reversed match
+        if my_routes_sorted[i] == ref_routes_sorted[i] or my_routes_sorted[i] == ref_routes_sorted[i][::-1]:
+            is_match = "MATCH"
+            
+    print(f"{mine:<50} | {ref}  [{is_match}]")
+```
 
 
 
