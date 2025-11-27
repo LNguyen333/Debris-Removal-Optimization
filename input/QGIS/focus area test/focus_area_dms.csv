@@ -1,0 +1,3 @@
+WKT,fid,Disposal Site,Address 1,Citation,Latitude,Longitude,distance_to_node,osmid,node_latitude,node_longitude
+"POINT (-81.9404797 26.4506141)",1,Bay Oaks DMS,"2731 Oak St, Fort Myers Beach, FL 33931",Google Maps,26.45035724,-81.94068298,0.000327566509282383,1925188152,26.4506141,-81.9404797
+"POINT (-81.9391435 26.4489467)",2,FMB Elementary School DMS,"Fort Myers Beach, FL 33931",Google Maps,26.44862285,-81.93910093,0.000326635924847553,5706749089,26.4489467,-81.9391435

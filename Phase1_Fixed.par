@@ -1,0 +1,3 @@
+PROBLEM_FILE = Phase1_Fixed.vrp
+RUNS = 10
+TOUR_FILE = Phase1_Fixed.tour

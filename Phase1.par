@@ -1,0 +1,4 @@
+
+PROBLEM_FILE = Phase1.vrp
+RUNS = 10
+TOUR_FILE = Phase1.tour

@@ -1,0 +1,2 @@
+WKT,fid,Name,Address,Latitude,Longitude,distance_to_node,osmid,node_latitude,node_longitude
+"POINT (-81.9343098 26.4451082)",1,Fort Myers Beach,"100 Voorhis St, Fort Myers Beach, FL 33931",26.4449542,-81.93428535,0.000155928837933903,8776543597,26.4451082,-81.9343098
