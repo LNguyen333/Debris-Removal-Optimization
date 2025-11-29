@@ -76,9 +76,8 @@ script_directory = os.path.dirname(__file__)
 Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
 OSM_path = os.path.join(script_directory, 'input', 'OSM')
 QGIS_path = os.path.join(script_directory, 'input', 'QGIS')
-focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area') # Change file here for different focus area
-
-output_base_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area') # Change file here for different focus area
+focus_area_path = os.path.join(script_directory, 'input', 'QGIS', 'focus area test') # !!!CHANGE THIS FILE!!!
+output_base_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area test') # !!!CHANGE THIS FILE!!!
 ```
 
 ## Lee County
@@ -116,7 +115,7 @@ edges_df = pd.read_csv(edges_path)
 focus_area_nodes_path = os.path.join(focus_area_path, 'focus_area_nodes.csv')
 focus_area_edges_path = os.path.join(focus_area_path, 'focus_area_edges.csv')
 focus_area_piles_path = os.path.join(focus_area_path, 'focus_area_piles.csv')
-focus_area_loads_path = os.path.join(focus_area_path, 'focus_area_loads.csv')
+# focus_area_loads_path = os.path.join(focus_area_path, 'focus_area_loads.csv')
 focus_area_fire_station_path = os.path.join(focus_area_path, 'focus_area_fire_station.csv')
 focus_area_dms_path = os.path.join(focus_area_path, 'focus_area_dms.csv')
 focus_area_hospital_path = os.path.join(focus_area_path, 'focus_area_hospital.csv')
@@ -125,7 +124,7 @@ focus_area_fuel_site_path = os.path.join(focus_area_path, 'focus_area_fuel_site.
 focus_area_nodes_df = pd.read_csv(focus_area_nodes_path)
 focus_area_edges_df = pd.read_csv(focus_area_edges_path)
 focus_area_piles_df = pd.read_csv(focus_area_piles_path)
-focus_area_loads_df = pd.read_csv(focus_area_loads_path)
+# focus_area_loads_df = pd.read_csv(focus_area_loads_path)
 focus_area_fire_station_df = pd.read_csv(focus_area_fire_station_path)
 focus_area_dms_df = pd.read_csv(focus_area_dms_path)
 focus_area_hospital_df = pd.read_csv(focus_area_hospital_path)

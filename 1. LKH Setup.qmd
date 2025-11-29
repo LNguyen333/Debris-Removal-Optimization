@@ -1,0 +1,1040 @@
+---
+title: "1. LKH VRP Formulation"
+author: "Leanh Nguyen (Ln14)"
+
+date: 2025-11-28
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+  jupyter: python3
+---
+
+{{< pagebreak >}}
+
+# Loading And Setting Up Data
+
+```{python}
+import os
+import random
+import pandas as pd
+import geopandas as gpd
+import networkx as nx
+import rasterio
+from rasterio.mask import mask
+from shapely import wkt
+from shapely.geometry import Point
+
+# ----------------------------------------
+# 1. SETUP & CONFIGURATION
+# ----------------------------------------
+print("Setting up environment...")
+
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+script_directory = os.path.dirname(__file__)
+input_base = os.path.join(script_directory, 'input', 'QGIS', 'focus area test')
+output_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area test')
+os.makedirs(output_dir, exist_ok=True)
+
+# Files
+edge_path = os.path.join(input_base, 'focus_area_edges.csv')
+node_path = os.path.join(input_base, 'focus_area_nodes.csv')
+depot_path = os.path.join(input_base, 'focus_area_dms.csv')
+critical_path = os.path.join(input_base, 'focus_area_fire_station.csv')
+raster_path = os.path.join(input_base, 'Raster Data.tif')
+output_vrp_path = os.path.join(output_dir, 'Phase1_Debris_Final.vrp')
+
+# Parameters
+SPEED_MPH = 10 # CHANGE PARAMETER
+SPEED_METERS_PER_MIN = (SPEED_MPH * 1609.34) / 60
+print
+DEBRIS_TRAVEL_PENALTY_MIN = 60
+ROAD_WIDTH_FT = 24
+BLOCKAGE_THRESHOLD = 0.50
+
+# LKH Constraints
+CAPACITY_LIMIT = 480  # Max Piling Time per truck
+DISTANCE_LIMIT = 600  # Max Travel+Service Time per truck
+VEHICLES_COUNT = 5    # Increased to ensure feasibility
+NUM_RESIDENTIAL_NODES = 20
+
+# ==========================================
+# 2. LOAD DATA
+# ==========================================
+print("Loading Spatial Data...")
+df_edges = pd.read_csv(edge_path)
+df_nodes = pd.read_csv(node_path)
+df_depot = pd.read_csv(depot_path)
+df_critical = pd.read_csv(critical_path)
+
+# Convert WKT
+df_edges['geometry'] = df_edges['WKT'].apply(wkt.loads)
+df_nodes['geometry'] = df_nodes['WKT'].apply(wkt.loads)
+df_critical['geometry'] = df_critical['WKT'].apply(wkt.loads)
+
+# GeoDataFrames
+gdf_edges = gpd.GeoDataFrame(df_edges, geometry='geometry', crs="EPSG:4326")
+gdf_nodes = gpd.GeoDataFrame(df_nodes, geometry='geometry', crs="EPSG:4326")
+gdf_critical = gpd.GeoDataFrame(df_critical, geometry='geometry', crs="EPSG:4326")
+
+# Project to Meters
+gdf_edges_proj = gdf_edges.to_crs("EPSG:3857")
+gdf_nodes_proj = gdf_nodes.to_crs("EPSG:3857")
+```
+
+```{python}
+# ==========================================
+# 3. IDENTIFY BLOCKED ROADS
+# ==========================================
+print("Identifying Blocked Roads...")
+blocked_status = []
+
+with rasterio.open(raster_path) as src:
+    # Reproject edges to match Raster CRS
+    gdf_edges_raster_crs = gdf_edges.to_crs(src.crs)
+    
+    # Calculate buffer (Rough approximation if Degrees, Exact if Meters)
+    if src.res[0] < 0.1: 
+        buffer_width = (ROAD_WIDTH_FT * 0.3048) / 111000 
+    else: 
+        buffer_width = (ROAD_WIDTH_FT * 0.3048) / 2
+
+    for idx, row in gdf_edges_raster_crs.iterrows():
+        try:
+            road_geom = row['geometry'].buffer(buffer_width)
+            out_image, _ = mask(src, [road_geom], crop=True)
+            
+            valid_mask = out_image[0] >= 0
+            if valid_mask.sum() == 0:
+                blocked_status.append(0)
+                continue
+
+            debris_pixels = (out_image[0] > 0).sum()
+            total_pixels = valid_mask.sum()
+            
+            if (debris_pixels / total_pixels) >= BLOCKAGE_THRESHOLD:
+                blocked_status.append(1)
+            else:
+                blocked_status.append(0)
+        except:
+            blocked_status.append(0)
+
+df_edges['blocked'] = blocked_status
+```
+
+```{python}
+# ==========================================
+# 4. BUILD INITIAL GRAPH
+# ==========================================
+print("Building Initial Graph...")
+G_raw = nx.Graph()
+
+# Add all nodes first (to ensure ID existence)
+for osmid in df_nodes['osmid'].unique():
+    G_raw.add_node(osmid)
+
+# Add edges with weights
+for idx, row in df_edges.iterrows():
+    u, v = row['u'], row['v']
+    # Calculate weight
+    w = row['length'] / SPEED_METERS_PER_MIN
+    if row['blocked'] == 1:
+        w += DEBRIS_TRAVEL_PENALTY_MIN
+    
+    # Add edge
+    if G_raw.has_node(u) and G_raw.has_node(v):
+        G_raw.add_edge(u, v, weight=w, blocked=row['blocked'])
+```
+
+```{python}
+# ==========================================
+# 5. CLEAN GRAPH (REMOVE ISOLATED NODES)
+# ==========================================
+print("Cleaning Graph (Removing Disconnected Islands)...")
+# Get Largest Connected Component
+largest_cc = max(nx.connected_components(G_raw), key=len)
+G = G_raw.subgraph(largest_cc).copy()
+
+print(f"  > Original Nodes: {len(G_raw.nodes)}")
+print(f"  > Cleaned Nodes: {len(G.nodes)}")
+print(f"  > Removed {len(G_raw.nodes) - len(G.nodes)} unreachable nodes.")
+```
+
+```{python}
+# ==========================================
+# 6. RENUMBER NODES (OSMID -> 1..N)
+# ==========================================
+# We must re-index 1 to N based on the CLEANED graph
+final_nodes = list(G.nodes())
+osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(final_nodes)}
+lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(final_nodes)}
+total_nodes = len(final_nodes)
+```
+
+```{python}
+# ==========================================
+# 7. MAP SPECIAL NODES (Depot/Critical/Res)
+# ==========================================
+print("Mapping Special Nodes...")
+
+# Helper: Find closest VALID node in the CLEANED graph
+def get_closest_valid_node(point, nodes_gdf, valid_osmids):
+    if nodes_gdf.crs != "EPSG:3857":
+        nodes_gdf = nodes_gdf.to_crs("EPSG:3857")
+    
+    # Filter GeoDataFrame to only valid nodes
+    valid_nodes_gdf = nodes_gdf[nodes_gdf['osmid'].isin(valid_osmids)].copy()
+    
+    pt_proj = gpd.GeoSeries([point], crs="EPSG:4326").to_crs("EPSG:3857")[0]
+    distances = valid_nodes_gdf.geometry.distance(pt_proj)
+    closest_osmid = valid_nodes_gdf.loc[distances.idxmin(), 'osmid']
+    return osmid_to_lkh[closest_osmid]
+
+# 1. Depot
+depot_pt = wkt.loads(df_depot.iloc[0]['WKT'])
+depot_id = get_closest_valid_node(depot_pt, gdf_nodes_proj, final_nodes)
+
+# 2. Critical
+critical_ids = []
+for _, row in df_critical.iterrows():
+    nid = get_closest_valid_node(row['geometry'], gdf_nodes_proj, final_nodes)
+    critical_ids.append(nid)
+critical_ids = list(set(critical_ids))
+
+# 3. Residential (Random Sample)
+available = [n for n in range(1, total_nodes+1) if n != depot_id and n not in critical_ids]
+if len(available) < NUM_RESIDENTIAL_NODES:
+    residential_ids = available
+else:
+    residential_ids = random.sample(available, NUM_RESIDENTIAL_NODES)
+```
+
+```{python}
+# ==========================================
+# 8. GENERATE FULL COST MATRIX (APSP)
+# ==========================================
+print("Generating All-Pairs Shortest Path Matrix...")
+# Because G is fully connected, we won't get infinite values here
+# This solves the "LKH Cheating" issue by providing valid paths between ALL nodes
+
+# Remap graph to LKH IDs for calculation
+G_lkh = nx.relabel_nodes(G, osmid_to_lkh)
+
+# Calculate Matrix using Floyd-Warshall (or repeated Dijkstra for large graphs)
+# Using repeated Dijkstra here as it handles weights reliably
+matrix_rows = []
+
+for i in range(1, total_nodes + 1):
+    # Shortest paths from i to ALL other nodes
+    length_dict = nx.single_source_dijkstra_path_length(G_lkh, i, weight='weight')
+    
+    row_vals = []
+    for j in range(1, total_nodes + 1):
+        if i == j:
+            row_vals.append(999999) # Cost to self
+        else:
+            # If graph is connected, length_dict[j] should always exist
+            cost = length_dict.get(j, 999999) 
+            row_vals.append(int(cost))
+    
+    matrix_rows.append(" ".join(map(str, row_vals)))
+```
+
+
+```{python}
+# ==========================================
+# 9. CALCULATE DEMANDS & WINDOWS
+# ==========================================
+demands = {}
+time_windows = {}
+
+TW_CRITICAL = (0, int(DISTANCE_LIMIT * 0.25))
+TW_RESIDENTIAL = (0, int(DISTANCE_LIMIT * 0.50))
+TW_STANDARD = (0, DISTANCE_LIMIT * 5) # Open window
+
+for i in range(1, total_nodes + 1):
+    # DEMAND (Blocked Edges)
+    edges = G_lkh.edges(i, data=True)
+    blocked_count = sum(1 for u, v, d in edges if d.get('blocked') == 1)
+    
+    if blocked_count == 0: dem = 0
+    elif blocked_count == 1: dem = 60
+    elif blocked_count == 2: dem = 120
+    elif blocked_count == 3: dem = 180
+    else: dem = 240
+    demands[i] = dem
+
+    # WINDOWS
+    if i == depot_id:
+        time_windows[i] = (0, DISTANCE_LIMIT)
+    elif i in critical_ids:
+        time_windows[i] = TW_CRITICAL
+    elif i in residential_ids:
+        time_windows[i] = TW_RESIDENTIAL
+    else:
+        time_windows[i] = TW_STANDARD
+```
+
+```{python}
+# ==========================================
+# 10. WRITE VRP & PRINT INFO
+# ==========================================
+print(f"Writing VRP to {output_vrp_path}...")
+
+with open(output_vrp_path, 'w') as f:
+    f.write("NAME : Phase1_Final\n")
+    f.write("TYPE : CVRPTW\n")
+    f.write(f"DIMENSION : {total_nodes}\n")
+    f.write(f"CAPACITY : {CAPACITY_LIMIT}\n")
+    f.write(f"DISTANCE : {DISTANCE_LIMIT}\n")
+    f.write(f"VEHICLES : {VEHICLES_COUNT}\n")
+    f.write("EDGE_WEIGHT_TYPE : EXPLICIT\n")
+    f.write("EDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+    f.write("SERVICE_TIME : 0\n")
+    f.write("DEPOT_SECTION\n")
+    f.write(f"{depot_id}\n-1\n")
+    
+    f.write("DEMAND_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        f.write(f"{i} {demands[i]}\n")
+        
+    f.write("TIME_WINDOW_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        s, e = time_windows[i]
+        f.write(f"{i} {s} {e}\n")
+        
+    f.write("EDGE_WEIGHT_SECTION\n")
+    for line in matrix_rows:
+        f.write(f"{line}\n")
+    f.write("EOF\n")
+
+print("\n" + "="*30)
+print("       NODE INFORMATION")
+print("="*30)
+print(f"Total Nodes in Network: {total_nodes}")
+print(f"Depot Node ID: {depot_id}")
+print(f"Critical Nodes (Fire Stations): {critical_ids}")
+print(f"Residential Nodes (Random): {residential_ids}")
+print("="*30)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+import os
+import random
+import pandas as pd
+import geopandas as gpd
+import networkx as nx
+import rasterio
+from rasterio.mask import mask
+from shapely import wkt
+from shapely.geometry import Point
+from shapely.ops import nearest_points
+
+# ==========================================
+# 1. SETUP & CONFIGURATION
+# ==========================================
+print("Setting up environment...")
+
+# Paths
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+script_directory = os.path.dirname(__file__)
+input_base = os.path.join(script_directory, 'input', 'QGIS', 'focus area test')
+output_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area test')
+os.makedirs(output_dir, exist_ok=True)
+
+# Files
+edge_path = os.path.join(input_base, 'focus_area_edges.csv')
+node_path = os.path.join(input_base, 'focus_area_nodes.csv')
+depot_path = os.path.join(input_base, 'focus_area_dms.csv')
+critical_path = os.path.join(input_base, 'focus_area_fire_station.csv')
+raster_path = os.path.join(input_base, 'Raster Data.tif')
+output_vrp_path = os.path.join(output_dir, 'Phase1_Debris_Prioritized.vrp')
+
+# Parameters
+SPEED_MPH = 10
+SPEED_METERS_PER_MIN = (SPEED_MPH * 1609.34) / 60
+DEBRIS_TRAVEL_PENALTY_MIN = 60
+ROAD_WIDTH_FT = 24
+BLOCKAGE_THRESHOLD = 0.50
+
+# Constraints
+# CAPACITY = Max Time allowed for PILING debris (Demand)
+CAPACITY_LIMIT = 300  # e.g., 5 hours of physical work
+# DISTANCE = Max Time allowed for DRIVING + SERVICE
+DISTANCE_LIMIT = 600  # e.g., 10 hours total shift
+VEHICLES_COUNT = 3
+NUM_RESIDENTIAL_NODES = 20 # Changeable variable
+```
+
+
+```{python}
+# ==========================================
+# 2. LOAD & PREPARE SPATIAL DATA
+# ==========================================
+print("Loading Spatial Data...")
+df_edges = pd.read_csv(edge_path)
+df_nodes = pd.read_csv(node_path)
+df_depot = pd.read_csv(depot_path)
+df_critical = pd.read_csv(critical_path)
+
+# Convert to GeoDataFrames
+df_edges['geometry'] = df_edges['WKT'].apply(wkt.loads)
+df_nodes['geometry'] = df_nodes['WKT'].apply(wkt.loads)
+df_critical['geometry'] = df_critical['WKT'].apply(wkt.loads)
+
+gdf_edges = gpd.GeoDataFrame(df_edges, geometry='geometry', crs="EPSG:4326")
+gdf_nodes = gpd.GeoDataFrame(df_nodes, geometry='geometry', crs="EPSG:4326")
+gdf_critical = gpd.GeoDataFrame(df_critical, geometry='geometry', crs="EPSG:4326")
+
+# Project main graph to Meters (EPSG:3857) for distance calcs
+gdf_edges_proj = gdf_edges.to_crs("EPSG:3857")
+gdf_nodes_proj = gdf_nodes.to_crs("EPSG:3857")
+```
+
+```{python}
+# ==========================================
+# 3. FIX BLOCKED ROADS (CRS MATCHING)
+# ==========================================
+print("Analyzing Blocked Roads (Fixing CRS)...")
+
+blocked_status = []
+
+with rasterio.open(raster_path) as src:
+    raster_crs = src.crs
+    print(f"  > Raster CRS: {raster_crs}")
+    
+    # CRITICAL FIX: Reproject vector edges to match the Raster's CRS exactly
+    gdf_edges_raster_crs = gdf_edges.to_crs(raster_crs)
+    
+    # Calculate buffer size in Raster's units. 
+    # If Raster is in Meters, use Meters. If Degrees, convert.
+    # Assuming Raster is projected (Meters). If Raster is WGS84, this buffer will be huge (degrees).
+    # Safety Check:
+    if src.res[0] < 0.1: # Likely Degrees
+        # Simplification: Convert 24ft to ~degrees (very rough)
+        buffer_width = (ROAD_WIDTH_FT * 0.3048) / 111000 
+    else: # Likely Meters
+        buffer_width = (ROAD_WIDTH_FT * 0.3048) / 2
+
+    for idx, row in gdf_edges_raster_crs.iterrows():
+        try:
+            # 1. Buffer line to get polygon of road surface
+            road_geom = row['geometry'].buffer(buffer_width)
+            
+            # 2. Mask raster with polygon
+            out_image, out_transform = mask(src, [road_geom], crop=True)
+            
+            # 3. Count pixels
+            # Assuming debris values are 1 or 2. Clear is 0 or NoData.
+            valid_data_mask = out_image[0] >= 0
+            total_pixels = valid_data_mask.sum()
+            
+            if total_pixels == 0:
+                blocked_status.append(0)
+                continue
+
+            debris_pixels = (out_image[0] > 0).sum()
+            
+            # 4. Check Threshold
+            if (debris_pixels / total_pixels) >= BLOCKAGE_THRESHOLD:
+                blocked_status.append(1)
+            else:
+                blocked_status.append(0)
+                
+        except Exception as e:
+            blocked_status.append(0)
+
+df_edges['blocked'] = blocked_status
+print(f"  > Blocked Edges Found: {sum(blocked_status)}")
+```
+
+```{python}
+# ==========================================
+# 4. MAP SPECIAL NODES (Critical & Residential)
+# ==========================================
+print("Mapping Critical and Residential Nodes...")
+
+# Map OSMIDs to 1..N index
+unique_osmids = df_nodes['osmid'].unique()
+osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(unique_osmids)}
+lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(unique_osmids)}
+total_nodes = len(unique_osmids)
+
+# Helper to find closest graph node to a point
+def get_closest_node_id(point, nodes_gdf):
+    # Ensure CRS match
+    if nodes_gdf.crs != "EPSG:3857":
+        nodes_gdf = nodes_gdf.to_crs("EPSG:3857")
+        
+    # Convert point to 3857 for distance check
+    pt_proj = gpd.GeoSeries([point], crs="EPSG:4326").to_crs("EPSG:3857")[0]
+    
+    # Distance to all nodes
+    distances = nodes_gdf.geometry.distance(pt_proj)
+    closest_idx = distances.idxmin()
+    closest_osmid = nodes_gdf.iloc[closest_idx]['osmid']
+    return osmid_to_lkh.get(closest_osmid)
+
+# 1. Identify Depot
+depot_pt = wkt.loads(df_depot.iloc[0]['WKT'])
+depot_id = get_closest_node_id(depot_pt, gdf_nodes_proj)
+
+# 2. Identify Critical Nodes
+critical_ids = []
+for _, row in df_critical.iterrows():
+    nid = get_closest_node_id(row['geometry'], gdf_nodes_proj)
+    if nid: critical_ids.append(nid)
+critical_ids = list(set(critical_ids)) # Remove duplicates
+
+# 3. Identify Residential Nodes (Random Sample excluding Depot/Critical)
+available_nodes = [i for i in range(1, total_nodes+1) if i != depot_id and i not in critical_ids]
+if len(available_nodes) < NUM_RESIDENTIAL_NODES:
+    residential_ids = available_nodes
+else:
+    residential_ids = random.sample(available_nodes, NUM_RESIDENTIAL_NODES)
+
+print(f"  > Depot ID: {depot_id}")
+print(f"  > Critical Nodes: {len(critical_ids)}")
+print(f"  > Residential Nodes: {len(residential_ids)}")
+```
+
+```{python}
+# ==========================================
+# 5. BUILD GRAPH & MATRIX
+# ==========================================
+print("Constructing Graph...")
+G = nx.Graph()
+
+for idx, row in df_edges.iterrows():
+    u, v = row['u'], row['v']
+    if u in osmid_to_lkh and v in osmid_to_lkh:
+        # Time cost
+        time_cost = row['length'] / SPEED_METERS_PER_MIN
+        if row['blocked'] == 1:
+            time_cost += DEBRIS_TRAVEL_PENALTY_MIN
+            
+        G.add_edge(osmid_to_lkh[u], osmid_to_lkh[v], weight=time_cost, blocked=row['blocked'])
+
+print("Calculating Full Matrix (Shortest Paths)...")
+# Calculate All-Pairs Shortest Path for full matrix
+# Using Dijkstra for every node to ensure connectivity through valid paths
+matrix_rows = []
+
+# Pre-calculate paths from Depot (to ensure return trip exists)
+depot_paths = nx.single_source_dijkstra_path_length(G, depot_id, weight='weight')
+
+for i in range(1, total_nodes + 1):
+    row_vals = []
+    
+    # Calculate paths FROM node i to all others
+    try:
+        paths_from_i = nx.single_source_dijkstra_path_length(G, i, weight='weight')
+    except:
+        paths_from_i = {}
+
+    for j in range(1, total_nodes + 1):
+        if i == j:
+            row_vals.append(999999)
+        elif j in paths_from_i:
+            row_vals.append(int(paths_from_i[j]))
+        # Fail-safe: If disconnected, assume very high cost, UNLESS it's back to depot
+        elif j == depot_id and i in depot_paths:
+            # Assume symmetric return if graph allows
+            row_vals.append(int(depot_paths[i]))
+        else:
+            row_vals.append(999999)
+            
+    matrix_rows.append(" ".join(map(str, row_vals)))
+```
+
+```{python}
+# ==========================================
+# 6. CALCULATE DEMANDS & TIME WINDOWS
+# ==========================================
+demands = {}
+time_windows = {}
+
+# Priority Definitions (Time Windows)
+# Format: [Start, End]
+# Critical: Must be reached early (e.g., first 25% of shift)
+TW_CRITICAL = (0, int(DISTANCE_LIMIT * 0.25)) 
+# Residential: Must be reached by middle of shift
+TW_RESIDENTIAL = (0, int(DISTANCE_LIMIT * 0.50))
+# Others: Anytime
+TW_STANDARD = (0, DISTANCE_LIMIT * 10) # 10x ensures it's effectively "Anytime"
+
+for i in range(1, total_nodes + 1):
+    # 1. DEMAND (Piling Time)
+    if G.has_node(i):
+        edges = G.edges(i, data=True)
+        blocked_count = sum(1 for u, v, d in edges if d.get('blocked') == 1)
+        
+        if blocked_count == 0: dem = 0
+        elif blocked_count == 1: dem = 60
+        elif blocked_count == 2: dem = 120
+        elif blocked_count == 3: dem = 180
+        else: dem = 240
+        demands[i] = dem
+    else:
+        demands[i] = 0
+
+    # 2. TIME WINDOWS
+    if i == depot_id:
+        time_windows[i] = (0, DISTANCE_LIMIT)
+    elif i in critical_ids:
+        time_windows[i] = TW_CRITICAL
+    elif i in residential_ids:
+        time_windows[i] = TW_RESIDENTIAL
+    else:
+        time_windows[i] = TW_STANDARD
+```
+
+```{python}
+# ==========================================
+# 7. WRITE VRP FILE
+# ==========================================
+print(f"Writing VRP to {output_vrp_path}...")
+
+with open(output_vrp_path, 'w') as f:
+    f.write("NAME : Phase1_Debris_Prioritized\n")
+    f.write("COMMENT : CVRPTW with Critical/Residential Priority\n")
+    f.write("TYPE : CVRPTW\n")
+    f.write(f"DIMENSION : {total_nodes}\n")
+    f.write(f"CAPACITY : {CAPACITY_LIMIT}\n")
+    f.write(f"DISTANCE : {DISTANCE_LIMIT}\n")
+    f.write(f"VEHICLES : {VEHICLES_COUNT}\n")
+    f.write("EDGE_WEIGHT_TYPE : EXPLICIT\n")
+    f.write("EDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+    f.write(f"SERVICE_TIME : 0\n") # Demand handles service time here
+    
+    f.write("DEPOT_SECTION\n")
+    f.write(f"{depot_id}\n")
+    f.write("-1\n")
+    
+    f.write("DEMAND_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        f.write(f"{i} {demands[i]}\n")
+        
+    f.write("TIME_WINDOW_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        start, end = time_windows[i]
+        f.write(f"{i} {start} {end}\n")
+        
+    f.write("EDGE_WEIGHT_SECTION\n")
+    for line in matrix_rows:
+        f.write(f"{line}\n")
+        
+    f.write("EOF\n")
+
+print("Done.")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+import os
+import pandas as pd
+import geopandas as gpd
+import networkx as nx
+import rasterio
+from rasterio.mask import mask
+from shapely import wkt
+from shapely.geometry import LineString, Point
+import numpy as np
+
+# ==========================================
+# 1. SETUP PATHS
+# ==========================================
+print("Current Working Directory:", os.getcwd())
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+script_directory = os.path.dirname(__file__)
+
+# Input Paths
+input_base = os.path.join(script_directory, 'input', 'QGIS', 'focus area test')
+edge_path = os.path.join(input_base, 'focus_area_edges.csv')
+node_path = os.path.join(input_base, 'focus_area_nodes.csv')
+depot_path = os.path.join(input_base, 'focus_area_dms.csv')
+raster_path = os.path.join(input_base, 'Raster Data.tif')
+
+# Output Path
+output_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area test')
+os.makedirs(output_dir, exist_ok=True)
+output_vrp_path = os.path.join(output_dir, 'Phase1_Debris_Clearance.vrp')
+```
+
+```{python}
+# ==========================================
+# 2. CONFIGURATION PARAMETERS
+# ==========================================
+SPEED_MPH = 10
+SPEED_METERS_PER_MIN = (SPEED_MPH * 1609.34) / 60  # ~268 m/min
+DEBRIS_PENALTY_MIN = 60
+ROAD_WIDTH_FT = 24
+ROAD_WIDTH_METERS = ROAD_WIDTH_FT * 0.3048
+BLOCKAGE_THRESHOLD = 0.50 # 50% width blockage
+
+# LKH Parameters
+CAPACITY_LIMIT = 240 # Example default
+DISTANCE_LIMIT = 480 # Example default (8 hours)
+VEHICLES_COUNT = 3
+```
+
+```{python}
+# ==========================================
+# 3. LOAD DATA
+# ==========================================
+print("Loading Data...")
+df_edges = pd.read_csv(edge_path)
+df_nodes = pd.read_csv(node_path)
+df_depot = pd.read_csv(depot_path)
+
+# Convert WKT to Geometry
+df_edges['geometry'] = df_edges['WKT'].apply(wkt.loads)
+df_nodes['geometry'] = df_nodes['WKT'].apply(wkt.loads)
+gdf_edges = gpd.GeoDataFrame(df_edges, geometry='geometry', crs="EPSG:4326")
+gdf_nodes = gpd.GeoDataFrame(df_nodes, geometry='geometry', crs="EPSG:4326")
+
+# Project to Meters (EPSG:3857 used for calculation, generic metric)
+gdf_edges = gdf_edges.to_crs("EPSG:3857")
+gdf_nodes = gdf_nodes.to_crs("EPSG:3857")
+```
+
+```{python}
+# ==========================================
+# 4. DETERMINE BLOCKED ROADS (Raster Analysis)
+# ==========================================
+print("Analyzing Debris Raster for Blocked Roads...")
+
+# We must project the raster interaction. 
+# Assuming Raster is properly georeferenced. If CRS differs, we might need to reproject.
+# For this script, we assume the Raster aligns with the geometry.
+
+blocked_status = []
+
+with rasterio.open(raster_path) as src:
+    # Ensure CRS match (Basic check)
+    # Note: If raster is not EPSG:3857, we should ideally reproject the vector to the raster's CRS
+    # For robust code, let's reproject vector to raster CRS temporarily
+    raster_crs = src.crs
+    gdf_edges_raster_proj = gdf_edges.to_crs(raster_crs)
+    
+    for idx, row in gdf_edges_raster_proj.iterrows():
+        try:
+            # Buffer the line by half the road width to represent the road surface
+            # Note: Units of CRS must be meters/feet matching the width logic. 
+            # If Raster is Lat/Lon (4326), buffering by meters will fail. 
+            # Assuming Raster is projected (e.g. UTM). If not, this step requires manual CRS verification.
+            road_surface = row['geometry'].buffer(ROAD_WIDTH_METERS / 2)
+            
+            # Mask the raster with the road polygon
+            out_image, out_transform = mask(src, [road_surface], crop=True)
+            
+            # out_image is array of [band, row, col]. 
+            # Debris values are 1 (Low) and 2 (High). 0 is clear.
+            debris_pixels = (out_image[0] > 0).sum()
+            total_pixels = (out_image[0] >= 0).sum() # Count valid pixels in crop
+            
+            # Calculate pixel area in map units
+            pixel_size_x = src.res[0]
+            pixel_size_y = src.res[1]
+            pixel_area = pixel_size_x * pixel_size_y
+            
+            debris_area = debris_pixels * pixel_area
+            road_length = row['geometry'].length
+            road_area = road_length * ROAD_WIDTH_METERS
+            
+            # "Width blocked by 50%" approximation:
+            # If the area of debris covers > 50% of the total road area
+            if road_area > 0 and (debris_area / road_area) >= BLOCKAGE_THRESHOLD:
+                blocked_status.append(1) # Blocked
+            else:
+                blocked_status.append(0) # Clear
+                
+        except ValueError:
+            # Handle cases where geometry might be outside raster bounds
+            blocked_status.append(0)
+
+df_edges['blocked'] = blocked_status
+print(f"Identified {sum(blocked_status)} blocked edges out of {len(blocked_status)}.")
+```
+
+```{python}
+# ==========================================
+# 5. BUILD GRAPH & MAP NODES
+# ==========================================
+print("Building Network Graph...")
+
+# 1. Map OSMID to LKH IDs (1 to N)
+unique_osmids = df_nodes['osmid'].unique()
+osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(unique_osmids)}
+lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(unique_osmids)}
+total_nodes = len(unique_osmids)
+
+# 2. Identify Depot Node ID
+# Find node closest to depot coordinates
+depot_point = wkt.loads(df_depot.iloc[0]['WKT'])
+# Simple distance check in the node list
+# (Using unprojected lat/lon for quick check or projected for accuracy)
+# We use the 'osmid' from the depot file if it exists and matches
+if 'osmid' in df_depot.columns and df_depot.iloc[0]['osmid'] in osmid_to_lkh:
+    depot_osmid = df_depot.iloc[0]['osmid']
+    depot_lkh_id = osmid_to_lkh[depot_osmid]
+else:
+    # Fallback: Find closest node
+    # (Simplified for this script)
+    depot_lkh_id = 1 # Placeholder if not found, but likely it is in the node list
+
+# 3. Create NetworkX Graph
+G = nx.Graph()
+
+for idx, row in df_edges.iterrows():
+    u = row['u']
+    v = row['v']
+    
+    if u in osmid_to_lkh and v in osmid_to_lkh:
+        # Calculate Base Time (Minutes)
+        length_m = row['length'] # Ensure this column exists and is meters
+        travel_time = length_m / SPEED_METERS_PER_MIN
+        
+        # Add Debris Penalty
+        if row['blocked'] == 1:
+            travel_time += DEBRIS_PENALTY_MIN
+            
+        # Add edge to graph with weight
+        G.add_edge(osmid_to_lkh[u], osmid_to_lkh[v], weight=travel_time, blocked=row['blocked'])
+```
+
+```{python}
+# ==========================================
+# 6. CALCULATE DEMANDS
+# ==========================================
+print("Calculating Node Demands...")
+demands = {}
+
+for lkh_id in range(1, total_nodes + 1):
+    # Find adjacent edges in the graph
+    if G.has_node(lkh_id):
+        edges = G.edges(lkh_id, data=True)
+        blocked_count = 0
+        for u, v, data in edges:
+            if data.get('blocked') == 1:
+                blocked_count += 1
+        
+        # Logic: 1->60, 2->120, 3->180, 4+->240
+        if blocked_count == 0:
+            demands[lkh_id] = 0
+        elif blocked_count == 1:
+            demands[lkh_id] = 60
+        elif blocked_count == 2:
+            demands[lkh_id] = 120
+        elif blocked_count == 3:
+            demands[lkh_id] = 180
+        else:
+            demands[lkh_id] = 240
+    else:
+        demands[lkh_id] = 0
+```
+
+```{python}
+# ==========================================
+# 7. GENERATE MATRIX (Shortest Path to Depot Logic)
+# ==========================================
+print("Generating Cost Matrix...")
+
+# We need a dense matrix for the VRP file
+# Logic: 
+# If edge exists: Weight
+# If edge doesn't exist: 999999
+# EXCEPT: Every node must connect to Depot with Shortest Path cost
+
+# Pre-calculate shortest paths to Depot for all nodes
+try:
+    paths_to_depot = nx.single_source_dijkstra_path_length(G, depot_lkh_id, weight='weight')
+except:
+    print("Warning: Graph might not be fully connected to depot.")
+    paths_to_depot = {}
+
+matrix_lines = []
+
+for i in range(1, total_nodes + 1):
+    row_vals = []
+    for j in range(1, total_nodes + 1):
+        if i == j:
+            row_vals.append(999999) # Cost to self (usually inf or 0, LKH prefers High for ATSP often, but 999999 matches prompt)
+        
+        # Case 1: Connection to Depot
+        elif j == depot_lkh_id:
+            # Shortest path from i to Depot
+            cost = paths_to_depot.get(i, 999999)
+            row_vals.append(int(cost))
+            
+        # Case 2: Connection FROM Depot
+        elif i == depot_lkh_id:
+            # Shortest path from Depot to j
+            cost = paths_to_depot.get(j, 999999)
+            row_vals.append(int(cost))
+            
+        # Case 3: Direct Edge Exists
+        elif G.has_edge(i, j):
+            weight = G[i][j]['weight']
+            row_vals.append(int(weight))
+            
+        # Case 4: Non-existent edge
+        else:
+            row_vals.append(999999)
+            
+    matrix_lines.append(" ".join(map(str, row_vals)))
+
+```
+
+
+```{python}
+# ==========================================
+# 8. WRITE VRP FILE
+# ==========================================
+print(f"Writing VRP file to {output_vrp_path}...")
+
+with open(output_vrp_path, 'w') as f:
+    f.write("NAME : Phase1_Debris_Clearance\n")
+    f.write("COMMENT : 10 mph, distance in minutes + debris penalty\n")
+    f.write("TYPE : ADCVRP\n")
+    f.write(f"DIMENSION : {total_nodes}\n")
+    f.write(f"CAPACITY : {CAPACITY_LIMIT}\n")
+    f.write(f"DISTANCE : {DISTANCE_LIMIT}\n")
+    f.write(f"VEHICLES : {VEHICLES_COUNT}\n")
+    f.write("NODE_COORD_TYPE : TWOD_COORDS\n")
+    f.write("EDGE_WEIGHT_TYPE : EXPLICIT\n")
+    f.write("EDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+    
+    f.write("NODE_COORD_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        # Get coords from dataframe
+        osmid = lkh_to_osmid[i]
+        node_row = df_nodes[df_nodes['osmid'] == osmid]
+        if not node_row.empty:
+            # Assuming columns are 'x' and 'y' (Longitude, Latitude)
+            x = node_row.iloc[0]['x']
+            y = node_row.iloc[0]['y']
+            f.write(f"{i} {x} {y}\n")
+        else:
+            f.write(f"{i} 0 0\n")
+            
+    f.write("DEMAND_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        f.write(f"{i} {demands[i]}\n")
+        
+    f.write("DEPOT_SECTION\n")
+    f.write(f"{depot_lkh_id}\n")
+    f.write("-1\n")
+    
+    f.write("EDGE_WEIGHT_SECTION\n")
+    for line in matrix_lines:
+        f.write(f"{line}\n")
+        
+    f.write("EOF\n")
+
+print("Processing Complete.")
+```

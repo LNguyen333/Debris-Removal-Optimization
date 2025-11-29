@@ -50,12 +50,8 @@ import time
 
 # 1. SETUP PATHS
 solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
-# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\Phase1_Debris_Clearance.vrp"
-# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\DCVRP\INSTANCES\GWKC\D022-04g.vrp"
-# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRPTW\CVRPTW\INSTANCES\Homberger_200\C1_2_1.200.20.vrptw"
-# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\input\LKH\D022-04g_dis_mat.vrp"
-problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\input\LKH\Phase1_DebrisPass.vrp"
+# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase1_Debris_Final.vrp"
+problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase1_Debris_Clearance.vrp"
 
 # 2. LOAD THE PROBLEM DATA
 # Open the local .vrp file and read its text content into a variable
@@ -75,7 +71,7 @@ start_time = time.time()
     # max_trials: How many iterations to try improving the solution (higher = better result but slower)
     # runs: How many times to restart the solver completely (helps avoid getting stuck in local optima)
     # vehicles: How many vehicles allowed
-routes = lkh.solve(solver_path, problem=problem, max_trials=1000, runs=10, vehicles=3)
+routes = lkh.solve(solver_path, problem=problem, max_trials=10, runs=5, mtsp_min_size=2)
 
 # Capture the time after the solver finishes
 end_time = time.time()
@@ -90,88 +86,118 @@ print(f"Total Program Runtime: {runtime_seconds:.4f} seconds")
 # Print the resulting routes
 # The output is a list of lists. Each inner list is a route for one vehicle
 print(f"Best Routes Found: {routes}")
+
 ```
 
 ```{python}
-import numpy as np
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import shortest_path
+# ==========================================
+# PART 6: CALCULATE ROUTE TIMES (DISTANCES)
+# ==========================================
 
-# 1. SETUP: We reconstruct your matrix here exactly as you provided
-inf = 999999
-# Your 12x12 Matrix
-matrix = np.array([
-    [inf, 5,   inf, 6,   inf, inf, inf, inf, inf, inf, inf, inf], # Row 1
-    [5,   inf, 6,   inf, 6,   inf, inf, inf, inf, inf, inf, inf], # Row 2
-    [inf, 6,   inf, inf, inf, 5,   inf, inf, inf, inf, inf, inf], # Row 3
-    [6,   inf, inf, inf, 5,   inf, 5,   inf, inf, inf, inf, inf], # Row 4
-    [inf, 6,   inf, 5,   inf, 5,   inf, 5,   inf, inf, inf, inf], # Row 5 (Depot)
-    [inf, inf, 5,   inf, 5,   inf, inf, inf, 5,   inf, inf, inf], # Row 6
-    [inf, inf, inf, 5,   inf, inf, inf, 6,   inf, inf, inf, inf], # Row 7
-    [inf, inf, inf, inf, 5,   inf, 6,   inf, 5,   inf, 6,   inf], # Row 8
-    [inf, inf, inf, inf, inf, 5,   inf, 5,   inf, 6,   inf, 6  ], # Row 9
-    [inf, inf, inf, inf, inf, inf, inf, inf, 6,   inf, inf, inf], # Row 10
-    [inf, inf, inf, inf, inf, inf, inf, 6,   inf, inf, inf, 5  ], # Row 11
-    [inf, inf, inf, inf, inf, inf, inf, inf, 6,   inf, 5,   inf]  # Row 12
-])
+def get_matrix_from_content(content):
+    """Parses the EDGE_WEIGHT_SECTION from the VRP string into a 2D list."""
+    matrix = []
+    lines = content.splitlines()
+    reading = False
+    
+    for line in lines:
+        if "EDGE_WEIGHT_SECTION" in line:
+            reading = True
+            continue
+        if "EOF" in line:
+            break
+        if reading:
+            # Convert line of text numbers to list of integers
+            row = [int(x) for x in line.split() if x.strip()]
+            if row: # Only add non-empty rows
+                matrix.append(row)
+    return matrix
 
-# 2. THE FIX: Calculate All-Pairs Shortest Path
-# This fills in the '999999's with real travel costs (escaping dead ends)
-graph = csr_matrix(matrix)
-dist_matrix = shortest_path(csgraph=graph, directed=False, method='FW')
-fixed_matrix = dist_matrix.astype(int)
+def calculate_cost(route, matrix, depot_id, service_time=0):
+    """Sums the matrix weights for a specific route."""
+    if not route:
+        return 0, []
+    
+    # LKH uses 1-based indexing, Python uses 0-based.
+    # We must subtract 1 from every Node ID to find it in the matrix.
+    depot_idx = depot_id - 1
+    total_time = 0
+    breakdown = [] # To store individual step costs for debugging
+    
+    # 1. Travel from Depot to First Node
+    first_node_idx = route[0] - 1
+    step_cost = matrix[depot_idx][first_node_idx]
+    total_time += step_cost
+    breakdown.append(f"Depot->{route[0]}({step_cost})")
+    
+    # 2. Travel between nodes in the route
+    for i in range(len(route) - 1):
+        u_idx = route[i] - 1
+        v_idx = route[i+1] - 1
+        step_cost = matrix[u_idx][v_idx]
+        total_time += step_cost
+        breakdown.append(f"{route[i]}->{route[i+1]}({step_cost})")
+        
+    # 3. Travel from Last Node back to Depot
+    last_node_idx = route[-1] - 1
+    step_cost = matrix[last_node_idx][depot_idx]
+    total_time += step_cost
+    breakdown.append(f"{route[-1]}->Depot({step_cost})")
+    
+    # 4. Add Service Time (Optional: removes debris time at nodes)
+    # The matrix is travel time. Service time is extra.
+    # Total Service Time = (Number of stops) * Service_Time_Per_Stop
+    total_service = len(route) * service_time
+    total_time += total_service
+    
+    return total_time, breakdown
 
-# 3. GENERATE THE TEXT OUTPUT
-# This prints the EXACT file content you need for Notepad.
-output = []
-output.append("NAME : Phase1_Debris_Fixed")
-output.append("COMMENT : Matrix fixed to allow dead-end revisits")
-output.append("TYPE : CVRPTW") # Changed to CVRPTW because you have Time Windows
-output.append("DIMENSION : 12")
-output.append("CAPACITY : 100")
-output.append("DISTANCE : 10000000")
-output.append("VEHICLES : 2")
-output.append("SERVICE_TIME : 1")
-output.append("EDGE_WEIGHT_TYPE : EXPLICIT")
-output.append("EDGE_WEIGHT_FORMAT : FULL_MATRIX")
-output.append("DEPOT_SECTION")
-output.append("5")
-output.append("-1")
-output.append("DEMAND_SECTION")
-# Your original demands
-demands = [0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1]
-for i, d in enumerate(demands):
-    output.append(f"{i+1} {d}")
-output.append("TIME_WINDOW_SECTION")
-# Your original time windows
-tws = [
-    (1, 100, 100000), (2, 0, 1000), (3, 100, 100000), (4, 100, 100000),
-    (5, 0, 1000), (6, 100, 100000), (7, 0, 1000), (8, 100, 100000),
-    (9, 100, 100000), (10, 0, 1000), (11, 0, 1000), (12, 0, 1000)
-]
-for id, start, end in tws:
-    output.append(f"{id} {start} {end}")
+# --- EXECUTION ---
 
-output.append("EDGE_WEIGHT_SECTION")
-for row in fixed_matrix:
-    # Convert row to string, remove brackets
-    row_str = " ".join(map(str, row))
-    output.append(row_str)
+# 1. Get the Matrix
+# We reuse the 'problem_data' variable you read in Step 2 of your code
+matrix = get_matrix_from_content(problem_data)
 
-output.append("EOF")
+# 2. Define Depot and Service Time (Must match your VRP file)
+DEPOT_ID = 5
+SERVICE_TIME = 1 
 
-# Print the result
-print("\n" + "="*30)
-print("COPY EVERYTHING BELOW THIS LINE")
-print("="*30)
-print("\n".join(output))
+print("\n--- Detailed Route Costs ---")
+grand_total = 0
+
+for i, route in enumerate(routes):
+    if not route:
+        print(f"Vehicle {i+1}: Unused")
+        continue
+        
+    cost, steps = calculate_cost(route, matrix, DEPOT_ID, SERVICE_TIME)
+    grand_total += cost
+    
+    print(f"Vehicle {i+1} Route: {route}")
+    print(f"  > Steps: {', '.join(steps)}")
+    print(f"  > Service Time Added: {len(route) * SERVICE_TIME}")
+    print(f"  > TOTAL TIME: {cost}")
+    
+    # Validation Warning
+    if cost > 50: # Assuming your DISTANCE limit was 50
+        print(f"  *** WARNING: Route exceeds time limit of 50! ***")
+
+print(f"\nTotal Time Across All Vehicles: {grand_total}")
 ```
+
+
+
+
+
+
+
+
 
 ```{python}
 # 6. CALCULATE DISTANCE AND TIME (Conceptual)
 # LKH optimizes for 'Cost', which is usually Euclidean distance in VRP files.
 # Note: PyLKH returns the path, but usually prints the Cost to the console logs during execution.
-VEHICLE_SPEED = 40  # Speed in "Distance Units per Hour" (e.g., 40 mph)
+VEHICLE_SPEED = 10  # Speed in "Distance Units per Hour" (e.g., 40 mph)
 
 # PARSE COORDINATES
 def get_node_coords(file_content):
