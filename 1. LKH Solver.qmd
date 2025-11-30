@@ -50,8 +50,8 @@ import time
 
 # 1. SETUP PATHS
 solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase1_Debris_Final.vrp"
-problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase1_Debris_Clearance.vrp"
+problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase1_Debris_Final.vrp"
+# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase2_Debris_Removal.vrp"
 
 # 2. LOAD THE PROBLEM DATA
 # Open the local .vrp file and read its text content into a variable
@@ -88,6 +88,185 @@ print(f"Total Program Runtime: {runtime_seconds:.4f} seconds")
 print(f"Best Routes Found: {routes}")
 
 ```
+
+```{python}
+# ==========================================
+# EXPORT ROUTES FOR ANALYSIS
+# ==========================================
+import csv
+import os
+
+# Define output path (same folder as your VRP files)
+# Adjust path if necessary
+route_output_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\solution_routes.csv"
+
+print(f"Exporting routes to {route_output_path}...")
+
+with open(route_output_path, 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(["Vehicle_ID", "Step_Order", "LKH_Node_ID"])
+    
+    for v_idx, route in enumerate(routes):
+        if not route: continue
+        
+        # Add Depot as start
+        # Assuming Depot ID is 5 (Phase 1). Change if dynamic.
+        # Ideally, read from DEPOT_SECTION of your file, but hardcoding 5 is fine for now.
+        depot_id = 5 
+        writer.writerow([v_idx+1, 0, depot_id])
+        
+        for step_idx, node_id in enumerate(route):
+            writer.writerow([v_idx+1, step_idx+1, node_id])
+            
+        # Add Depot as end
+        writer.writerow([v_idx+1, len(route)+1, depot_id])
+
+print("Routes exported successfully.")
+```
+
+
+
+```{python}
+# ==========================================
+# 5. CALCULATE ROUTE METRICS (COST & FUEL)
+# ==========================================
+
+# CONFIGURATION
+# Set these based on which Phase you are running!
+CURRENT_PHASE = 1 # Set to 1 or 2
+FUEL_PRICE_PER_GALLON = 3.50
+MPG_TRUCK = 8.0 # Miles per gallon for heavy debris truck
+
+if CURRENT_PHASE == 1:
+    AVG_SPEED_MPH = 10
+    DISTANCE_UNIT_IN_FILE = "Minutes" 
+elif CURRENT_PHASE == 2:
+    AVG_SPEED_MPH = 20
+    DISTANCE_UNIT_IN_FILE = "Seconds" # Remember we changed Phase 2 to seconds
+
+def parse_vrp_data(content):
+    """Extracts Matrix and Demand from VRP string."""
+    matrix = []
+    demands = {}
+    lines = content.splitlines()
+    
+    section = None
+    for line in lines:
+        if "EDGE_WEIGHT_SECTION" in line:
+            section = "MATRIX"
+            continue
+        elif "DEMAND_SECTION" in line:
+            section = "DEMAND"
+            continue
+        elif "DEPOT_SECTION" in line or "TIME_WINDOW_SECTION" in line or "EOF" in line:
+            section = None
+            continue
+            
+        if section == "MATRIX":
+            row = [int(x) for x in line.split() if x.strip()]
+            if row: matrix.append(row)
+        elif section == "DEMAND":
+            parts = line.split()
+            if len(parts) >= 2:
+                demands[int(parts[0])] = int(parts[1])
+    return matrix, demands
+
+# 1. Parse Data
+matrix, demands_dict = parse_vrp_data(problem_data)
+
+# 2. Calculate Metrics
+print(f"\n--- {DISTANCE_UNIT_IN_FILE} BASED COST ANALYSIS (PHASE {CURRENT_PHASE}) ---")
+
+total_fleet_time_units = 0
+total_fleet_dist_miles = 0
+total_fleet_fuel_cost = 0
+
+for i, route in enumerate(routes):
+    if not route: continue
+    
+    route_time_units = 0
+    route_demand_units = 0
+    
+    # Calculate Travel Cost (Matrix)
+    # Start from Depot (Node 5, but Index 4) -> First Node
+    depot_idx = 4 # Assuming Depot is ID 5. Adjust if Depot ID changes!
+    
+    # Depot -> First
+    curr = route[0] - 1
+    route_time_units += matrix[depot_idx][curr]
+    
+    # Route Path
+    for j in range(len(route) - 1):
+        u, v = route[j]-1, route[j+1]-1
+        route_time_units += matrix[u][v]
+        route_demand_units += demands_dict.get(route[j], 0)
+        
+    # Last -> Depot
+    last = route[-1] - 1
+    route_time_units += matrix[last][depot_idx]
+    route_demand_units += demands_dict.get(route[-1], 0)
+    
+    # --- METRIC CONVERSIONS ---
+    # Convert Matrix Units to Hours for Distance Calc
+    if DISTANCE_UNIT_IN_FILE == "Minutes":
+        travel_hours = route_time_units / 60.0
+        # In Phase 1, Matrix includes Debris Penalty. 
+        # We crudely subtract penalty to estimate pure driving distance? 
+        # For simplicity, we assume Matrix Time is mostly Travel.
+    else: # Seconds
+        travel_hours = route_time_units / 3600.0
+
+    # Estimate Distance (Miles) = Time * Speed
+    est_distance_miles = travel_hours * AVG_SPEED_MPH
+    
+    # Estimate Fuel
+    est_fuel_cost = (est_distance_miles / MPG_TRUCK) * FUEL_PRICE_PER_GALLON
+    
+    # Accumulate
+    total_fleet_time_units += route_time_units
+    total_fleet_dist_miles += est_distance_miles
+    total_fleet_fuel_cost += est_fuel_cost
+
+    print(f"Vehicle {i+1}:")
+    print(f"  > Route Time: {route_time_units} {DISTANCE_UNIT_IN_FILE}")
+    print(f"  > Est. Distance: {est_distance_miles:.2f} miles")
+    print(f"  > Fuel Cost: ${est_fuel_cost:.2f}")
+
+print("-" * 30)
+print(f"FLEET TOTALS (Vehicles: {len([r for r in routes if r])})")
+print(f"Total Operational Time: {total_fleet_time_units} {DISTANCE_UNIT_IN_FILE}")
+print(f"Total Est. Distance:    {total_fleet_dist_miles:.2f} miles")
+print(f"Total Fuel Cost:        ${total_fleet_fuel_cost:.2f}")
+print("-" * 30)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ```{python}
 # ==========================================

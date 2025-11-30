@@ -36,7 +36,7 @@ execute:
 {{< pagebreak >}}
 
 # Loading And Setting Up Data
-
+The following varialbes 
 ```{python}
 import os
 import random
@@ -81,9 +81,9 @@ DISTANCE_LIMIT = 600  # Max Travel+Service Time per truck
 VEHICLES_COUNT = 5    # Increased to ensure feasibility
 NUM_RESIDENTIAL_NODES = 20
 
-# ==========================================
+# ----------------------------------------
 # 2. LOAD DATA
-# ==========================================
+# ----------------------------------------
 print("Loading Spatial Data...")
 df_edges = pd.read_csv(edge_path)
 df_nodes = pd.read_csv(node_path)
@@ -340,6 +340,612 @@ print(f"Critical Nodes (Fire Stations): {critical_ids}")
 print(f"Residential Nodes (Random): {residential_ids}")
 print("="*30)
 ```
+
+PHASE 2
+
+```{python}
+import os
+import random
+import pandas as pd
+import geopandas as gpd
+import networkx as nx
+import rasterio
+from rasterio.mask import mask
+from shapely import wkt
+from shapely.geometry import Point
+
+# ==========================================
+# 1. SETUP & CONFIGURATION
+# ==========================================
+print("Setting up Phase 2 environment...")
+
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+script_directory = os.path.dirname(__file__)
+input_base = os.path.join(script_directory, 'input', 'QGIS', 'focus area test')
+output_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area test')
+os.makedirs(output_dir, exist_ok=True)
+
+# Files
+edge_path = os.path.join(input_base, 'focus_area_edges.csv')
+node_path = os.path.join(input_base, 'focus_area_nodes.csv')
+depot_path = os.path.join(input_base, 'focus_area_dms.csv')
+loads_path = os.path.join(input_base, 'focus_area_loads.csv') # New Input
+raster_path = os.path.join(input_base, 'Raster Data.tif')
+
+# Output Files
+phase1_record_path = os.path.join(output_dir, 'Phase1_Service_Record.csv')
+output_vrp_path = os.path.join(output_dir, 'Phase2_Debris_Removal.vrp')
+
+# Phase 2 Parameters
+SPEED_MPH = 20 # Faster speed now
+SPEED_METERS_PER_MIN = (SPEED_MPH * 1609.34) / 60
+ROAD_WIDTH_FT = 24
+BLOCKAGE_THRESHOLD = 0.50
+
+# Cleanup Conversion
+CLEANUP_RATE_CYD_PER_HR = 30 
+CLEANUP_RATE_CYD_PER_MIN = CLEANUP_RATE_CYD_PER_HR / 60 # 0.5 CYD/min
+
+# LKH Constraints (Phase 2)
+CAPACITY_LIMIT = 30   # Truck Capacity in CYD
+DISTANCE_LIMIT = 2880 # 48 Hours (Not time critical)
+VEHICLES_COUNT = 5    
+
+# ==========================================
+# 2. LOAD SPATIAL DATA
+# ==========================================
+print("Loading Data...")
+df_edges = pd.read_csv(edge_path)
+df_nodes = pd.read_csv(node_path)
+df_depot = pd.read_csv(depot_path)
+df_loads = pd.read_csv(loads_path) # Load Debris Data
+
+# Convert Geometry
+df_edges['geometry'] = df_edges['WKT'].apply(wkt.loads)
+df_nodes['geometry'] = df_nodes['WKT'].apply(wkt.loads)
+# Loads usually come as Lat/Lon columns, create Points
+df_loads['geometry'] = df_loads.apply(lambda row: Point(row['Load Longitude'], row['Load Latitude']), axis=1)
+
+# GeoDataFrames
+gdf_edges = gpd.GeoDataFrame(df_edges, geometry='geometry', crs="EPSG:4326")
+gdf_nodes = gpd.GeoDataFrame(df_nodes, geometry='geometry', crs="EPSG:4326")
+gdf_loads = gpd.GeoDataFrame(df_loads, geometry='geometry', crs="EPSG:4326")
+
+# Project to Meters
+gdf_edges_proj = gdf_edges.to_crs("EPSG:3857")
+gdf_nodes_proj = gdf_nodes.to_crs("EPSG:3857")
+gdf_loads_proj = gdf_loads.to_crs("EPSG:3857")
+```
+
+```{python}
+# ==========================================
+# 3. GRAPH BUILD & CLEANING (ROBUST FIX)
+# ==========================================
+print("Building and Cleaning Network...")
+
+G_raw = nx.Graph()
+
+# 1. Add edges
+for idx, row in df_edges.iterrows():
+    G_raw.add_edge(row['u'], row['v'])
+
+# 2. CRITICAL FIX: Remove "Ghost" Nodes
+# We remove any node from the graph that does not exist in our Node CSV.
+# This ensures we always have coordinates for every node in the final graph.
+valid_osmids = set(df_nodes['osmid'].unique())
+ghost_nodes = [n for n in G_raw.nodes if n not in valid_osmids]
+
+if ghost_nodes:
+    print(f"Warning: Removing {len(ghost_nodes)} nodes found in Edges but missing from Node file.")
+    G_raw.remove_nodes_from(ghost_nodes)
+
+# 3. Keep Largest Component
+if len(G_raw.nodes) > 0:
+    largest_cc = max(nx.connected_components(G_raw), key=len)
+    G = G_raw.subgraph(largest_cc).copy()
+else:
+    raise ValueError("Graph is empty after cleaning! Check your Input IDs.")
+
+final_nodes = list(G.nodes())
+
+# Mappings
+osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(final_nodes)}
+lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(final_nodes)}
+total_nodes = len(final_nodes)
+
+# Identify Depot ID
+depot_pt = wkt.loads(df_depot.iloc[0]['WKT'])
+# Find closest VALID node to depot
+depot_nodes_gdf = gdf_nodes_proj[gdf_nodes_proj['osmid'].isin(final_nodes)]
+depot_pt_proj = gpd.GeoSeries([depot_pt], crs="EPSG:4326").to_crs("EPSG:3857")[0]
+closest_idx = depot_nodes_gdf.geometry.distance(depot_pt_proj).idxmin()
+depot_osmid = depot_nodes_gdf.loc[closest_idx, 'osmid']
+depot_id = osmid_to_lkh[depot_osmid]
+```
+
+```{python}
+# ==========================================
+# 4. RE-CALCULATE PHASE 1 DEMAND (CREDIT)
+# ==========================================
+print("Calculating Phase 1 Credits (Piling Work)...")
+
+blocked_edges_count = {osmid: 0 for osmid in final_nodes}
+
+with rasterio.open(raster_path) as src:
+    gdf_edges_raster = gdf_edges.to_crs(src.crs)
+    # Filter only edges in our clean graph
+    valid_u = set(final_nodes)
+    valid_v = set(final_nodes)
+    
+    # Approx buffer logic
+    if src.res[0] < 0.1: buffer_width = (ROAD_WIDTH_FT * 0.3048) / 111000 
+    else: buffer_width = (ROAD_WIDTH_FT * 0.3048) / 2
+
+    for idx, row in gdf_edges_raster.iterrows():
+        if row['u'] in valid_u and row['v'] in valid_v:
+            try:
+                road_geom = row['geometry'].buffer(buffer_width)
+                out_image, _ = mask(src, [road_geom], crop=True)
+                valid_mask = out_image[0] >= 0
+                if valid_mask.sum() > 0:
+                    debris = (out_image[0] > 0).sum()
+                    if (debris / valid_mask.sum()) >= BLOCKAGE_THRESHOLD:
+                        blocked_edges_count[row['u']] += 1
+                        blocked_edges_count[row['v']] += 1
+            except:
+                pass
+
+# Calculate Phase 1 Demand (Minutes) and save Record
+phase1_data = []
+phase1_credits_cyd = {} 
+
+for i in range(1, total_nodes + 1):
+    osmid = lkh_to_osmid[i]
+    count = blocked_edges_count.get(osmid, 0)
+    
+    # Phase 1 Logic
+    if count == 0: mins = 0
+    elif count == 1: mins = 60
+    elif count == 2: mins = 120
+    elif count == 3: mins = 180
+    else: mins = 240
+    
+    # Calculate CYD Credit
+    credit_cyd = mins * CLEANUP_RATE_CYD_PER_MIN
+    phase1_credits_cyd[i] = credit_cyd
+    
+    # Record Data
+    # SAFE LOOKUP: We now know 'osmid' exists in df_nodes because we filtered the graph in Section 3
+    node_geo = df_nodes[df_nodes['osmid'] == osmid]
+    
+    # Extra safety check just in case
+    if not node_geo.empty:
+        lat = node_geo.iloc[0]['y']
+        lon = node_geo.iloc[0]['x']
+        
+        if mins > 0:
+            phase1_data.append({
+                'LKH_ID': i,
+                'OSMID': osmid,
+                'Latitude': lat,
+                'Longitude': lon,
+                'Phase1_Demand_Min': mins,
+                'Phase1_Credit_CYD': credit_cyd
+            })
+
+# Export Phase 1 Record
+pd.DataFrame(phase1_data).to_csv(phase1_record_path, index=False)
+print(f"Phase 1 Record saved to: {phase1_record_path}")
+```
+
+```{python}
+# ==========================================
+# 5. CALCULATE PHASE 2 DEMAND (CYD)
+# ==========================================
+print("Mapping Loads to Nodes and Calculating Net Demand...")
+
+# 1. Map Loads to Nearest Graph Node
+# Ensure we only snap to VALID nodes in the cleaned graph
+valid_nodes_gdf = gdf_nodes_proj[gdf_nodes_proj['osmid'].isin(final_nodes)].copy()
+
+# Spatial Join / Nearest Neighbor
+# Find nearest node index for every load
+gdf_loads_proj['nearest_node_idx'] = gdf_loads_proj.geometry.apply(
+    lambda x: valid_nodes_gdf.distance(x).idxmin()
+)
+
+# Map back to LKH ID
+gdf_loads_proj['LKH_ID'] = gdf_loads_proj['nearest_node_idx'].apply(
+    lambda idx: osmid_to_lkh[valid_nodes_gdf.loc[idx, 'osmid']]
+)
+
+# 2. Sum CYD per LKH ID
+# Assuming column name is 'CYD' in load file.
+node_load_sums = gdf_loads_proj.groupby('LKH_ID')['CYD'].sum().to_dict()
+
+# 3. Calculate Final Net Demand
+final_demands = {}
+
+for i in range(1, total_nodes + 1):
+    total_load = node_load_sums.get(i, 0)
+    credit = phase1_credits_cyd.get(i, 0)
+    
+    net_demand = total_load - credit
+    
+    # Ensure no negative demand
+    if net_demand < 0:
+        net_demand = 0
+        
+    final_demands[i] = round(net_demand, 2) # Keep 2 decimals or int
+```
+
+```{python}
+# ==========================================
+# 6. GENERATE MATRIX (20 MPH)
+# ==========================================
+print("Generating Phase 2 Matrix (20 MPH)...")
+
+G_lkh = nx.Graph()
+for idx, row in df_edges.iterrows():
+    u, v = row['u'], row['v']
+    if u in osmid_to_lkh and v in osmid_to_lkh:
+        # 20 MPH Speed, No Debris Penalty
+        time_cost = row['length'] / SPEED_METERS_PER_MIN 
+        G_lkh.add_edge(osmid_to_lkh[u], osmid_to_lkh[v], weight=time_cost)
+
+# Calculate APSP
+matrix_rows = []
+for i in range(1, total_nodes + 1):
+    path_lengths = nx.single_source_dijkstra_path_length(G_lkh, i, weight='weight')
+    
+    row_vals = []
+    for j in range(1, total_nodes + 1):
+        if i == j:
+            row_vals.append(999999)
+        else:
+            cost = path_lengths.get(j, 999999)
+            row_vals.append(int(cost)) # Int for LKH
+            
+    matrix_rows.append(" ".join(map(str, row_vals)))
+```
+
+
+```{python}
+# ==========================================
+# 7. WRITE VRP FILE
+# ==========================================
+print(f"Writing VRP to {output_vrp_path}...")
+
+with open(output_vrp_path, 'w') as f:
+    f.write("NAME : Phase2_Debris_Removal\n")
+    f.write("COMMENT : CVRP, 20mph, Demand=CYD\n")
+    f.write("TYPE : CVRP\n") # Simple CVRP now
+    f.write(f"DIMENSION : {total_nodes}\n")
+    f.write(f"CAPACITY : {CAPACITY_LIMIT}\n")
+    f.write(f"DISTANCE : {DISTANCE_LIMIT}\n")
+    f.write(f"VEHICLES : {VEHICLES_COUNT}\n")
+    f.write("EDGE_WEIGHT_TYPE : EXPLICIT\n")
+    f.write("EDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+    f.write("NODE_COORD_TYPE : TWOD_COORDS\n") # Added coords back for this phase if needed
+    
+    f.write("NODE_COORD_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        osmid = lkh_to_osmid[i]
+        row = df_nodes[df_nodes['osmid'] == osmid].iloc[0]
+        f.write(f"{i} {row['x']} {row['y']}\n")
+
+    f.write("DEMAND_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        # Round up to int for LKH standard, or keep float if supported (LKH prefers Int)
+        # We will round up to nearest integer to be safe
+        dem_int = int(final_demands[i]) if final_demands[i] > 0 else 0
+        f.write(f"{i} {dem_int}\n")
+        
+    f.write("DEPOT_SECTION\n")
+    f.write(f"{depot_id}\n-1\n")
+    
+    f.write("EDGE_WEIGHT_SECTION\n")
+    for line in matrix_rows:
+        f.write(f"{line}\n")
+    f.write("EOF\n")
+
+print("\nProcessing Complete.")
+print(f"Phase 1 Record: {len(phase1_data)} nodes served.")
+print(f"Phase 2 VRP Created. Total Net Debris: {sum(final_demands.values())} CYD")
+```
+
+```{python}
+# ==========================================
+# 7. WRITE VRP FILE (DEBUGGED)
+# ==========================================
+print(f"Writing VRP to {output_vrp_path}...")
+
+# DEBUG: Check top 5 demands
+sorted_demands = sorted(final_demands.items(), key=lambda x: x[1], reverse=True)[:5]
+print(f"DEBUG: Top 5 Highest Demands in Memory: {sorted_demands}")
+
+with open(output_vrp_path, 'w') as f:
+    f.write("NAME : Phase2_Debris_Removal\n")
+    f.write("COMMENT : CVRP, 20mph, Demand=CYD\n")
+    f.write("TYPE : CVRP\n")
+    f.write(f"DIMENSION : {total_nodes}\n")
+    f.write(f"CAPACITY : {CAPACITY_LIMIT}\n")
+    f.write(f"DISTANCE : {DISTANCE_LIMIT}\n")
+    f.write(f"VEHICLES : {VEHICLES_COUNT}\n")
+    f.write("EDGE_WEIGHT_TYPE : EXPLICIT\n")
+    f.write("EDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+    f.write("NODE_COORD_TYPE : TWOD_COORDS\n")
+    
+    f.write("NODE_COORD_SECTION\n")
+    for i in range(1, total_nodes + 1):
+        osmid = lkh_to_osmid[i]
+        # Robust lookup: ensure we find the node even if index type differs
+        row = df_nodes[df_nodes['osmid'] == osmid]
+        if not row.empty:
+            x = row.iloc[0]['x']
+            y = row.iloc[0]['y']
+            f.write(f"{i} {x} {y}\n")
+        else:
+            # Fallback (should not happen with clean graph)
+            f.write(f"{i} 0 0\n")
+
+    f.write("DEMAND_SECTION\n")
+    non_zero_count = 0
+    for i in range(1, total_nodes + 1):
+        # DIRECT LOOKUP: We know i is 1..N
+        # We use .get() to avoid KeyErrors if a node has 0 demand and wasn't added to dict
+        raw_demand = final_demands.get(i, 0)
+        
+        # Round logic
+        dem_int = int(round(raw_demand))
+        if dem_int < 0: dem_int = 0
+        
+        if dem_int > 0:
+            non_zero_count += 1
+            
+        f.write(f"{i} {dem_int}\n")
+        
+    f.write("DEPOT_SECTION\n")
+    f.write(f"{depot_id}\n-1\n")
+    
+    f.write("EDGE_WEIGHT_SECTION\n")
+    for line in matrix_rows:
+        f.write(f"{line}\n")
+    f.write("EOF\n")
+
+print("\nProcessing Complete.")
+print(f"DEBUG: Wrote non-zero demand to {non_zero_count} nodes in the VRP file.")
+print(f"Phase 1 Record: {len(phase1_data)} nodes served.")
+print(f"Phase 2 VRP Created. Total Net Debris: {sum(final_demands.values())} CYD")
+```
+
+
+
+
+
+
+
+
+```{python}
+# ==========================================
+# A. EXPORT QGIS NODES (Depot, Critical, Res)
+# ==========================================
+print("\nExporting QGIS Node CSVs...")
+
+# Helper to extract data
+def export_node_subset(node_ids, filename):
+    data = []
+    for nid in node_ids:
+        osmid = lkh_to_osmid.get(nid)
+        # Find row in original dataframe
+        row = df_nodes[df_nodes['osmid'] == osmid]
+        if not row.empty:
+            data.append({
+                'LKH_ID': nid,
+                'OSMID': osmid,
+                'Longitude': row.iloc[0]['x'],
+                'Latitude': row.iloc[0]['y']
+            })
+    
+    out_path = os.path.join(output_dir, filename)
+    pd.DataFrame(data).to_csv(out_path, index=False)
+    print(f"  > Exported {filename}")
+
+# 1. Depot
+export_node_subset([depot_id], "nodes_depot.csv")
+
+# 2. Critical Facilities
+export_node_subset(critical_ids, "nodes_critical.csv")
+
+# 3. Residential Nodes (From Phase 1 Logic)
+export_node_subset(residential_ids, "nodes_residential.csv")
+
+
+```
+
+```{python}
+# ==========================================
+# 3. IDENTIFY BLOCKED ROADS (RASTER ANALYSIS)
+# ==========================================
+print("Identifying Blocked Roads...")
+blocked_status = []
+
+# Ensure we have the raster path defined
+if not os.path.exists(raster_path):
+    print(f"WARNING: Raster not found at {raster_path}. Assuming all roads clear.")
+    blocked_status = [0] * len(df_edges)
+else:
+    with rasterio.open(raster_path) as src:
+        # Reproject edges to match Raster CRS for accurate overlap
+        gdf_edges_raster_crs = gdf_edges.to_crs(src.crs)
+        
+        # Calculate buffer (Rough approximation if Degrees, Exact if Meters)
+        if src.res[0] < 0.1: 
+            # If resolution is small (degrees), approx 24ft in degrees
+            buffer_width = (ROAD_WIDTH_FT * 0.3048) / 111000 
+        else: 
+            # If resolution is large (meters), exact 24ft in meters / 2
+            buffer_width = (ROAD_WIDTH_FT * 0.3048) / 2
+
+        # Iterate through every edge
+        for idx, row in gdf_edges_raster_crs.iterrows():
+            try:
+                # 1. Create road polygon
+                road_geom = row['geometry'].buffer(buffer_width)
+                
+                # 2. Check raster pixels inside polygon
+                out_image, _ = mask(src, [road_geom], crop=True)
+                
+                # 3. Calculate blockage
+                valid_mask = out_image[0] >= 0
+                if valid_mask.sum() == 0:
+                    blocked_status.append(0)
+                    continue
+
+                debris_pixels = (out_image[0] > 0).sum()
+                total_pixels = valid_mask.sum()
+                
+                if (debris_pixels / total_pixels) >= BLOCKAGE_THRESHOLD:
+                    blocked_status.append(1)
+                else:
+                    blocked_status.append(0)
+            except:
+                # Fallback for geometry errors
+                blocked_status.append(0)
+
+# CRITICAL STEP: Assign the calculated list to the DataFrame
+if len(blocked_status) == len(df_edges):
+    df_edges['blocked'] = blocked_status
+    print(f"  > Blockage analysis complete. Found {sum(blocked_status)} blocked edges.")
+else:
+    print("  > Warning: Blockage list length mismatch. Defaulting to 0.")
+    df_edges['blocked'] = 0
+
+# ==========================================
+# 4. BUILD INITIAL GRAPH (WITH BLOCKED & LENGTH)
+# ==========================================
+print("Building Initial Graph...")
+G_raw = nx.Graph()
+
+# Add all nodes first (to ensure ID existence)
+for osmid in df_nodes['osmid'].unique():
+    G_raw.add_node(osmid)
+
+# Add edges with weights AND LENGTH
+for idx, row in df_edges.iterrows():
+    u, v = row['u'], row['v']
+    
+    # Calculate weight (Time in Minutes)
+    w = row['length'] / SPEED_METERS_PER_MIN
+    
+    # Check blockage (Now safe because we created the column above)
+    if row['blocked'] == 1:
+        w += DEBRIS_TRAVEL_PENALTY_MIN
+    
+    # Add edge
+    if G_raw.has_node(u) and G_raw.has_node(v):
+        # We store 'length_m' here to fix the CLR Metric crash later
+        G_raw.add_edge(u, v, weight=w, blocked=row['blocked'], length_m=row['length'])
+
+print("  > Graph built successfully.")
+```
+
+```{python}
+# ==========================================
+# B. CALCULATE NETWORK RESILIENCE (CLR)
+# ==========================================
+print("\nCalculating Connectivity Loss Ratio (CLR)...")
+
+def calculate_efficiency(graph, weight_attr='weight'):
+    n = len(graph)
+    if n <= 1: return 0
+    # Use standard Dijkstra path length
+    path_lengths = dict(nx.all_pairs_dijkstra_path_length(graph, weight=weight_attr))
+    
+    sum_inv_dist = 0
+    for u in path_lengths:
+        for v, dist in path_lengths[u].items():
+            if u != v and dist > 0:
+                sum_inv_dist += (1 / dist)
+                
+    return sum_inv_dist / (n * (n - 1))
+
+# 1. Define Network States
+# We need to relabel G back to LKH IDs if it hasn't been done for this variable yet
+# (Assuming G is the final cleaned graph with OSMIDs, usually we relabel G_lkh)
+# Let's work with G_lkh which definitely has LKH IDs (1..N) if it exists in your variable scope.
+# If G has OSMIDs, we use G. If G has 1..N, we use G. 
+# The safest way is to use the G_lkh we created in Section 8.
+
+# Use G_lkh (which uses IDs 1..N and contains the attributes from G)
+G_baseline = G_lkh.copy()
+
+for u, v, data in G_baseline.edges(data=True):
+    # CRITICAL FIX: Read length directly from the edge attribute
+    # No more DataFrame lookup crashing
+    dist_m = data.get('length_m', 1) # Default to 1 if missing
+    
+    # Reset weight to max speed (20mph), no penalty
+    # 20mph = ~536 m/min
+    G_baseline[u][v]['weight'] = dist_m / 536.0 
+
+# G_phase1: 10mph + 60min Penalty
+G_phase1 = G_lkh.copy() 
+
+# 2. Calculate Efficiencies
+print("  > Calculating Baseline Efficiency (Ideal State)...")
+eff_base = calculate_efficiency(G_baseline)
+
+print("  > Calculating Phase 1 Efficiency (Disrupted State)...")
+eff_p1 = calculate_efficiency(G_phase1)
+
+# 3. Calculate CLR
+if eff_base > 0:
+    clr_phase1 = 1 - (eff_p1 / eff_base)
+else:
+    clr_phase1 = 0
+
+print("-" * 30)
+print(f"Network Resilience Metrics")
+print("-" * 30)
+print(f"Baseline Efficiency: {eff_base:.6f}")
+print(f"Phase 1 Efficiency:  {eff_p1:.6f}")
+print(f"Connectivity Loss Ratio (CLR): {clr_phase1:.4%} (Higher = Worse Condition)")
+print("-" * 30)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
