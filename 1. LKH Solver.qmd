@@ -1,8 +1,8 @@
 ---
-title: "Debris Removal Optimization LKH"
+title: "1. LKH Solver"
 author: "Leanh Nguyen (Ln14)"
 
-date: 2025-03-27
+date: 2025-11-29
 
 format: 
     html: default
@@ -50,8 +50,8 @@ import time
 
 # 1. SETUP PATHS
 solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase1_Debris_Final.vrp"
-# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase2_Debris_Removal.vrp"
+# problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase1_Debris_Final.vrp"
+problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\1. Setup\focus area test\Phase2_Debris_Removal.vrp"
 
 # 2. LOAD THE PROBLEM DATA
 # Open the local .vrp file and read its text content into a variable
@@ -71,7 +71,8 @@ start_time = time.time()
     # max_trials: How many iterations to try improving the solution (higher = better result but slower)
     # runs: How many times to restart the solver completely (helps avoid getting stuck in local optima)
     # vehicles: How many vehicles allowed
-routes = lkh.solve(solver_path, problem=problem, max_trials=10, runs=5, mtsp_min_size=2)
+    # tsp_min_size: How many nodes a vehicle must pass
+routes = lkh.solve(solver_path, problem=problem, max_trials=1000, runs=10, mtsp_min_size=2)
 
 # Capture the time after the solver finishes
 end_time = time.time()
@@ -89,10 +90,108 @@ print(f"Best Routes Found: {routes}")
 
 ```
 
+RUN THIS BEFORE CLR CALCULATIONS IN SOLVER.QMD AND AFTER PHASE 1 RUN ONLY
+
 ```{python}
 # ==========================================
-# EXPORT ROUTES FOR ANALYSIS
+# 5. EXPORT ROUTES WITH REAL QGIS COORDINATES
 # ==========================================
+import csv
+import pandas as pd
+import networkx as nx
+import os
+
+print("\n--- Exporting Routes with QGIS Coordinates ---")
+
+# 1. SETUP PATHS (Must match your Generator Script)
+base_dir = r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization'
+input_dir = os.path.join(base_dir, 'input', 'QGIS', 'focus area test')
+edge_path = os.path.join(input_dir, 'focus_area_edges.csv')
+node_path = os.path.join(input_dir, 'focus_area_nodes.csv')
+depot_path = os.path.join(input_dir, 'focus_area_dms.csv')
+
+output_csv = os.path.join(base_dir, 'output', '1. Setup', 'focus area test', 'solution_routes.csv') #CHANGE THIS solution_routes for phase 1, solution_routes2 for phase 2
+
+# 2. REBUILD THE ID MAPPING (Source of Truth)
+print("Rebuilding Node ID Map from Source Files...")
+df_edges = pd.read_csv(edge_path)
+df_nodes = pd.read_csv(node_path)
+
+# Build the exact same graph structure used in Setup
+G_raw = nx.Graph()
+for osmid in df_nodes['osmid'].unique():
+    G_raw.add_node(osmid)
+
+for idx, row in df_edges.iterrows():
+    G_raw.add_edge(row['u'], row['v'])
+
+# Keep Largest Component (Same logic as Setup)
+largest_cc = max(nx.connected_components(G_raw), key=len)
+G = G_raw.subgraph(largest_cc).copy()
+final_nodes = list(G.nodes())
+
+# Create Mapping: LKH ID (1..N) -> OSMID
+lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(final_nodes)}
+
+# Create Coordinate Dictionary: OSMID -> (Lat, Lon)
+# Ensure OSMID types match (convert to string for safety)
+df_nodes['osmid_str'] = df_nodes['osmid'].astype(str)
+coord_lookup = {}
+for idx, row in df_nodes.iterrows():
+    coord_lookup[str(row['osmid'])] = (row['x'], row['y'])
+
+print(f"Mapped {len(lkh_to_osmid)} LKH IDs to real coordinates.")
+
+# 3. IDENTIFY DEPOT
+# We need the Depot's LKH ID.
+# Assuming you used the default logic, finding the closest node to the DMS file.
+df_depot = pd.read_csv(depot_path)
+# For now, let's look at the generated route to find the Start/End node
+# Usually, the Depot is the node that starts/ends every route.
+# We will detect it from the 'routes' variable LKH returned.
+if routes and routes[0]:
+    # LKH routes don't include the depot in the list, they imply it.
+    # We need the ID we passed to DEPOT_SECTION.
+    # Let's assume ID 5 based on your previous logs, or recalculate.
+    # Safer: Look at the .vrp file content in memory
+    lines = problem_data.splitlines()
+    depot_id = 5 # Default
+    for i, line in enumerate(lines):
+        if "DEPOT_SECTION" in line:
+            depot_id = int(lines[i+1].strip())
+            break
+else:
+    depot_id = 5
+
+# 4. EXPORT TO CSV
+print(f"Writing to {output_csv}...")
+
+with open(output_csv, 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(["Vehicle_ID", "Step_Order", "LKH_Node_ID", "OSMID", "Longitude", "Latitude"])
+    
+    for v_idx, route in enumerate(routes):
+        if not route: continue
+        
+        # --- DEPOT START ---
+        osmid_depot = lkh_to_osmid.get(depot_id, "UNKNOWN")
+        dx, dy = coord_lookup.get(str(osmid_depot), (0, 0))
+        writer.writerow([v_idx+1, 0, depot_id, osmid_depot, dx, dy])
+        
+        # --- ROUTE ---
+        for step_idx, node_id in enumerate(route):
+            osmid = lkh_to_osmid.get(node_id, "UNKNOWN")
+            nx, ny = coord_lookup.get(str(osmid), (0, 0))
+            writer.writerow([v_idx+1, step_idx+1, node_id, osmid, nx, ny])
+            
+        # --- DEPOT END ---
+        writer.writerow([v_idx+1, len(route)+1, depot_id, osmid_depot, dx, dy])
+
+print("Success! Routes exported with Real QGIS Coordinates.")
+```
+
+```python
+# EXPORT ROUTES FOR ANALYSIS
 import csv
 import os
 
@@ -124,8 +223,6 @@ with open(route_output_path, 'w', newline='') as f:
 print("Routes exported successfully.")
 ```
 
-
-
 ```{python}
 # ==========================================
 # 5. CALCULATE ROUTE METRICS (COST & FUEL)
@@ -133,7 +230,7 @@ print("Routes exported successfully.")
 
 # CONFIGURATION
 # Set these based on which Phase you are running!
-CURRENT_PHASE = 1 # Set to 1 or 2
+CURRENT_PHASE = 2 # Set to 1 or 2
 FUEL_PRICE_PER_GALLON = 3.50
 MPG_TRUCK = 8.0 # Miles per gallon for heavy debris truck
 
@@ -239,33 +336,6 @@ print(f"Total Est. Distance:    {total_fleet_dist_miles:.2f} miles")
 print(f"Total Fuel Cost:        ${total_fleet_fuel_cost:.2f}")
 print("-" * 30)
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 ```{python}
@@ -513,328 +583,4 @@ routes = [r for r in routes if r]
 # Plot
 plot_solution(coords, routes)
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-```{python}
-# --- 1. CONFIGURATION ---
-# Paths
-vrp_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
-tour_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\TOURS\Augerat_A\A-n32-k5.784.tour"
-lkh_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-
-# Problem Specifics
-DIMENSION = 32  # The number of real nodes in A-n32-k5 (from the filename)
-
-# --- 2. HELPER: PARSE THE .TOUR FILE ---
-def parse_solution_file(filepath, dimension):
-    """
-    Reads a TSPLIB .tour file and converts it to a list of routes.
-    Handles 'Dummy Depots' (nodes > dimension).
-    """
-    with open(filepath, 'r') as f:
-        lines = f.read().splitlines()
-    
-    raw_tour = []
-    reading = False
-    
-    # Extract the raw sequence of numbers
-    for line in lines:
-        if "TOUR_SECTION" in line:
-            reading = True
-            continue
-        if "-1" in line or "EOF" in line:
-            break
-        if reading:
-            val = int(line.strip())
-            raw_tour.append(val)
-
-    # Convert sequence to Routes
-    # Logic: Any node ID > Dimension, or Node 1, indicates a return to depot/split.
-    routes = []
-    current_route = []
-    
-    for node in raw_tour:
-        is_depot = (node == 1)
-        is_dummy = (node > dimension) # Nodes 33, 34, 35, 36 are dummy depots
-        
-        if is_depot or is_dummy:
-            if current_route:
-                routes.append(current_route)
-                current_route = []
-        else:
-            current_route.append(node)
-            
-    # Catch trailing route if exists
-    if current_route:
-        routes.append(current_route)
-        
-    return routes
-
-# --- 3. HELPER: CALCULATE DISTANCE ---
-def get_coords_and_dist(vrp_content, routes):
-    # 1. Parse Coords
-    coords = {}
-    lines = vrp_content.splitlines()
-    reading = False
-    for line in lines:
-        if "NODE_COORD_SECTION" in line:
-            reading = True; continue
-        if "DEMAND_SECTION" in line: break
-        if reading:
-            parts = line.split()
-            if len(parts) >= 3:
-                coords[int(parts[0])] = (float(parts[1]), float(parts[2]))
-
-    # 2. Calculate Total Distance
-    total_dist = 0
-    for route in routes:
-        full_path = [1] + route + [1] # Add depot (1) to start and end
-        for i in range(len(full_path)-1):
-            n1, n2 = full_path[i], full_path[i+1]
-            dist = math.sqrt((coords[n1][0]-coords[n2][0])**2 + (coords[n1][1]-coords[n2][1])**2)
-            total_dist += dist
-            
-    return total_dist
-
-# --- 4. MAIN EXECUTION ---
-
-# A. Run YOUR Solver
-print("--- Running Your Solver ---")
-with open(vrp_file_path, 'r') as f:
-    problem_data = f.read()
-problem = lkh.LKHProblem.parse(problem_data)
-# Force 5 vehicles to match the solution file
-my_routes = lkh.solve(lkh_path, problem=problem, max_trials=10000, runs=10, vehicles=5)
-
-# B. Parse the REFERENCE Solution (.tour file)
-print("--- Reading Reference Solution ---")
-reference_routes = parse_solution_file(tour_file_path, DIMENSION)
-
-# C. Compare
-print("\n" + "="*40)
-print("COMPARISON REPORT")
-print("="*40)
-
-# Calculate Distances
-my_dist = get_coords_and_dist(problem_data, my_routes)
-ref_dist = get_coords_and_dist(problem_data, reference_routes)
-
-print(f"My Calculated Distance:  {my_dist:.2f}")
-print(f"Reference File Distance: {ref_dist:.2f}")
-print(f"Difference:              {abs(my_dist - ref_dist):.2f}")
-
-print("\n--- Route Content Comparison ---")
-# We sort the routes by their first node to make visual comparison easier
-my_routes_sorted = sorted(my_routes, key=lambda x: x[0])
-ref_routes_sorted = sorted(reference_routes, key=lambda x: x[0])
-
-print(f"{'MY ROUTES':<50} | {'REFERENCE ROUTES'}")
-print("-" * 100)
-
-# Loop through the maximum number of routes to print side-by-side
-max_len = max(len(my_routes_sorted), len(ref_routes_sorted))
-for i in range(max_len):
-    mine = str(my_routes_sorted[i]) if i < len(my_routes_sorted) else "---"
-    ref = str(ref_routes_sorted[i]) if i < len(ref_routes_sorted) else "---"
-    
-    # Check if they are identical (ignoring reverse order)
-    is_match = "MISMATCH"
-    if i < len(my_routes_sorted) and i < len(ref_routes_sorted):
-        # Check exact match or reversed match
-        if my_routes_sorted[i] == ref_routes_sorted[i] or my_routes_sorted[i] == ref_routes_sorted[i][::-1]:
-            is_match = "MATCH"
-            
-    print(f"{mine:<50} | {ref}  [{is_match}]")
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-```python
-import requests
-import lkh
-import urllib3
-
-# This line disables the warning that will appear when you bypass SSL verification
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# --- Configuration ---
-# 1. Set the correct path to YOUR LKH-3 executable.
-solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-
-# 2. Get the problem from the web, bypassing SSL verification for this trusted site.
-print("Downloading VRP problem...")
-problem_str = requests.get(
-    'http://vrp.atd-lab.inf.puc-rio.br/media/com_vrp/instances/A/A-n32-k5.vrp', 
-    verify=False
-)
-# Check if the download was successful before proceeding
-problem_str.raise_for_status() 
-problem = lkh.LKHProblem.parse(problem_str.text)
-print("Problem loaded successfully.")
-
-# 3. Solve the problem and capture the result
-print("Starting solver...")
-try:
-    tours, cost = lkh.solve(solver_path, problem=problem, max_trials=10000, runs=10)
-
-    # # 4. Print the final solution
-    # print("\n--- Solver Finished ---")
-    # print(f"✅ Success! Found a solution with cost: {cost}")
-    # print("Vehicle Routes:")
-    # for i, tour in enumerate(tours):
-    #     route_str = " -> ".join(map(str, tour))
-    #     print(f"  Vehicle {i+1}: Depot -> {route_str} -> Depot")
-except Exception as e:
-    print(f"\n--- 🛑 Solver Failed ---")
-    # print(f"Error: {e}")
-
-```
-
-
-
-
-
-```python
-import lkh
-
-# 1. Define the path to your LKH-3 executable.
-# Using a raw string (r"...") is a good practice for Windows paths.
-solver_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
-
-# 2. Define the path to your VRP problem file.
-problem_file_path = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\CVRP\INSTANCES\Augerat_A\A-n32-k5.vrp"
-
-# 3. Read the problem file from your local disk.
-with open(problem_file_path, 'r') as f:
-    problem_str = f.read()
-
-# 4. Parse the problem string into an LKHProblem object.
-problem = lkh.LKHProblem.parse(problem_str)
-
-# 5. Run the solver.
-# The summary statistics you requested will be printed directly to the console by LKH-3.
-print("--- Starting LKH-3 Solver ---")
-
-# The PyLKH wrapper executes the LKH-3 solver, which then prints its own summary table.
-# This call will produce the output you're looking for.
-solution=lkh.solve(solver_path, problem=problem, max_trials=100, runs=10)
-print(solution)
-print("\n--- Solver Finished ---")
-```
-
-```python
-try:
-    # **CORRECTION HERE**
-    # Unpack the result into two variables: tours and cost
-    # Increased max_trials to get a better solution
-    tours, cost = lkh.solve(solver_path, problem=problem, max_trials=10000, runs=10)
-
-    # --- Print and Analyze the Solution ---
-    print("\n--- Solver Finished ---")
-    print(f"✅ Success! Found a solution.")
-    
-    # print("\n--- VEHICLE ROUTES ---")
-    # for i, tour in enumerate(tours):
-    #     route_str = " -> ".join(map(str, tour))
-    #     print(f"  Vehicle {i+1}: Depot -> {route_str} -> Depot")
-        
-    print("\n--- COST ANALYSIS ---")
-    print(f"Solution Cost: {cost}")
-    print(f"Best Known Solution (BKS): {BKS}")
-    
-    # # Calculate the Gap Percentage
-    # gap = ((cost - BKS) / BKS) * 100
-    # print(f"Gap: {gap:.2f}%")
-
-    # if gap == 0.0:
-    #     print("Excellent! Your solution matches the Best Known Solution.")
-    # else:
-    #     print("Your solution is suboptimal. Try increasing max_trials or runs.")
-
-except ValueError:
-    print("\n--- 🛑 Solver Failed ---")
-    print("The solver did not return a valid solution (tours, cost).")
-    print("This often happens if 'max_trials' is too low for the solver to find a feasible route.")
-
-```
-
-
-
-
 
