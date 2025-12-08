@@ -1,7 +1,7 @@
 ---
 title: "1. LKH Solver"
 author: "Leanh Nguyen (Ln14)"
-
+jupyter: python3
 date: 2025-11-29
 
 format: 
@@ -30,16 +30,11 @@ date-format: "ddd., MMM. D"
 execute: 
   cache: true
   freeze: auto
-  jupyter: python3
 ---
 
 {{< pagebreak >}}
 
 # Setting Up Data
-
-Notes:
-- os.chdir(): changes the current working directory to a specific path
-- os.getcwd(): gets current working directory
 
 ```{python}
 import itertools # Used to create the pairs for the background network
@@ -72,7 +67,7 @@ start_time = time.time()
     # runs: How many times to restart the solver completely (helps avoid getting stuck in local optima)
     # vehicles: How many vehicles allowed
     # tsp_min_size: How many nodes a vehicle must pass
-routes = lkh.solve(solver_path, problem=problem, max_trials=1000, runs=10, mtsp_min_size=2)
+routes = lkh.solve(solver_path, problem=problem, max_trials=100, runs=5, mtsp_min_size=2)
 
 # Capture the time after the solver finishes
 end_time = time.time()
@@ -87,7 +82,6 @@ print(f"Total Program Runtime: {runtime_seconds:.4f} seconds")
 # Print the resulting routes
 # The output is a list of lists. Each inner list is a route for one vehicle
 print(f"Best Routes Found: {routes}")
-
 ```
 
 RUN THIS BEFORE CLR CALCULATIONS IN SOLVER.QMD AND AFTER PHASE 1 RUN ONLY
@@ -225,12 +219,155 @@ print("Routes exported successfully.")
 
 ```{python}
 # ==========================================
+# 5. CALCULATE ROUTE METRICS (SANITIZED)
+# ==========================================
+
+# CONFIGURATION
+CURRENT_PHASE = 1 
+FUEL_PRICE_PER_GALLON = 3.50
+MPG_TRUCK = 8.0 
+
+# Thresholds to detect anomalies
+INF_THRESHOLD = 900000 # If cost > this, it's a "Teleport" (999999)
+PHASE1_DEBRIS_PENALTY = 60 # Minutes
+
+if CURRENT_PHASE == 1:
+    AVG_SPEED_MPH = 10
+    DISTANCE_UNIT_IN_FILE = "Minutes" 
+elif CURRENT_PHASE == 2:
+    AVG_SPEED_MPH = 20
+    DISTANCE_UNIT_IN_FILE = "Seconds"
+
+def parse_vrp_data(content):
+    """Extracts Matrix and Demand from VRP string."""
+    matrix = []
+    demands = {}
+    lines = content.splitlines()
+    section = None
+    for line in lines:
+        if "EDGE_WEIGHT_SECTION" in line:
+            section = "MATRIX"
+            continue
+        elif "DEMAND_SECTION" in line:
+            section = "DEMAND"
+            continue
+        elif "DEPOT_SECTION" in line or "TIME_WINDOW_SECTION" in line or "EOF" in line:
+            section = None
+            continue
+            
+        if section == "MATRIX":
+            row = [int(x) for x in line.split() if x.strip()]
+            if row: matrix.append(row)
+        elif section == "DEMAND":
+            parts = line.split()
+            if len(parts) >= 2:
+                demands[int(parts[0])] = int(parts[1])
+    return matrix, demands
+
+# 1. Parse Data
+matrix, demands_dict = parse_vrp_data(problem_data)
+
+# 2. Calculate Metrics
+print(f"\n--- {DISTANCE_UNIT_IN_FILE} BASED COST ANALYSIS (PHASE {CURRENT_PHASE}) ---")
+
+total_fleet_time_units = 0
+total_fleet_dist_miles = 0
+total_fleet_fuel_cost = 0
+
+# Depot Logic (Assuming ID 5 is Index 4)
+# You should verify this index matches your file!
+depot_idx = 4 
+
+for i, route in enumerate(routes):
+    if not route: continue
+    
+    # Trackers for this specific vehicle
+    route_total_time = 0
+    route_drive_time_pure = 0 # For distance calc (excludes penalties/teleports)
+    teleport_count = 0
+    
+    # 1. Reconstruct full path including start/end Depot
+    # Route list from LKH is [A, B, C]. Full path is [Depot, A, B, C, Depot]
+    full_path_indices = [depot_idx] + [node_id - 1 for node_id in route] + [depot_idx]
+    
+    for k in range(len(full_path_indices) - 1):
+        u = full_path_indices[k]
+        v = full_path_indices[k+1]
+        
+        # Get weight from matrix
+        weight = matrix[u][v]
+        
+        # --- SANITIZATION LOGIC ---
+        
+        # Case A: Teleport / Infinity
+        if weight >= INF_THRESHOLD:
+            # Do NOT add to time or distance. Flag it.
+            teleport_count += 1
+            # We assume 0 distance for this jump because it doesn't exist physically
+            continue 
+            
+        # Case B: Phase 1 Debris Penalty
+        # If weight is huge (e.g. 65 mins) but distance is short, it includes penalty.
+        # Logic: If Phase 1 AND weight > Penalty, assume it's a blocked road.
+        # We want to subtract penalty to get DRIVING distance.
+        is_blocked = False
+        if CURRENT_PHASE == 1 and weight >= PHASE1_DEBRIS_PENALTY:
+            # Heuristic: If weight is exactly penalty + small drive time
+            # We subtract the penalty to calculate Miles Driven.
+            # But we KEEP the penalty in Total Operational Time (Payroll).
+            drive_component = weight - PHASE1_DEBRIS_PENALTY
+            
+            # Update Metrics
+            route_total_time += weight
+            route_drive_time_pure += drive_component
+            is_blocked = True
+        else:
+            # Standard Drive
+            route_total_time += weight
+            route_drive_time_pure += weight
+
+    # --- METRIC CONVERSIONS ---
+    
+    if DISTANCE_UNIT_IN_FILE == "Minutes":
+        drive_hours = route_drive_time_pure / 60.0
+    else: # Seconds
+        drive_hours = route_drive_time_pure / 3600.0
+
+    # Calculate Miles
+    est_distance_miles = drive_hours * AVG_SPEED_MPH
+    
+    # Calculate Fuel
+    est_fuel_cost = (est_distance_miles / MPG_TRUCK) * FUEL_PRICE_PER_GALLON
+    
+    # Accumulate Fleet Totals
+    total_fleet_time_units += route_total_time
+    total_fleet_dist_miles += est_distance_miles
+    total_fleet_fuel_cost += est_fuel_cost
+
+    print(f"Vehicle {i+1}:")
+    print(f"  > Operational Time: {route_total_time} {DISTANCE_UNIT_IN_FILE}")
+    print(f"  > Est. Distance:    {est_distance_miles:.2f} miles")
+    print(f"  > Fuel Cost:        ${est_fuel_cost:.2f}")
+    if teleport_count > 0:
+        print(f"  *** WARNING: Route used {teleport_count} non-existent edges (999999). Graph may be disconnected. ***")
+
+print("-" * 30)
+print(f"FLEET TOTALS (Vehicles: {len([r for r in routes if r])})")
+print(f"Total Operational Time: {total_fleet_time_units} {DISTANCE_UNIT_IN_FILE}")
+print(f"Total Est. Distance:    {total_fleet_dist_miles:.2f} miles")
+print(f"Total Fuel Cost:        ${total_fleet_fuel_cost:.2f}")
+print("-" * 30)
+```
+
+
+```python
+# ==========================================
 # 5. CALCULATE ROUTE METRICS (COST & FUEL)
 # ==========================================
 
 # CONFIGURATION
 # Set these based on which Phase you are running!
-CURRENT_PHASE = 2 # Set to 1 or 2
+CURRENT_PHASE = 1 # Set to 1 or 2
 FUEL_PRICE_PER_GALLON = 3.50
 MPG_TRUCK = 8.0 # Miles per gallon for heavy debris truck
 

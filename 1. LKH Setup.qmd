@@ -35,36 +35,57 @@ execute:
 
 {{< pagebreak >}}
 
-# Loading And Setting Up Data
-The following varialbes 
+# 1     SETUP AND CONFIGURATION
+
+## 1.1  Import libraries, input, and output directories
+
 ```{python}
-
-# 1. SETUP & CONFIGURATION
-
-import os
-import random
-import pandas as pd
 import geopandas as gpd
 import networkx as nx
+import os
+import pandas as pd
+import random
 import rasterio
 from rasterio.mask import mask
 from shapely import wkt
 from shapely.geometry import Point
-
+# Input and output directories
 os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
 script_directory = os.path.dirname(__file__)
 input_base = os.path.join(script_directory, 'input', 'QGIS', 'focus area test')
 output_dir = os.path.join(script_directory, 'output', '1. Setup', 'focus area test')
 os.makedirs(output_dir, exist_ok=True)
-
-# Files
+# Input files
 edge_path = os.path.join(input_base, 'focus_area_edges.csv')
 node_path = os.path.join(input_base, 'focus_area_nodes.csv')
 depot_path = os.path.join(input_base, 'focus_area_dms.csv')
 critical_path = os.path.join(input_base, 'focus_area_fire_station.csv')
 raster_path = os.path.join(input_base, 'Raster Data.tif')
 output_vrp_path = os.path.join(output_dir, 'Phase1_Debris_Final.vrp')
+# Read data
+df_edges = pd.read_csv(edge_path)
+df_nodes = pd.read_csv(node_path)
+df_depot = pd.read_csv(depot_path)
+df_critical = pd.read_csv(critical_path)
+```
 
+## 1.2  Changeable parameters and constraints
+
+**User Inputs**
+
+- Current speed limit is                    10 mph 
+- Current travel time of a blocked road:    60 minutes
+- Road width:                               24 feet
+- Road blockage threshold:                  50%
+
+**LKH Constraints**
+
+- Max time allowed for piling:  480 minutes
+- Max time allowed per truck:   600 minutes
+- Max number of trucks:         74
+- Number of residential nodes:  20
+
+```{python}
 # Parameters
 SPEED_MPH = 10 # CHANGE PARAMETER
 SPEED_METERS_PER_MIN = (SPEED_MPH * 1609.34) / 60
@@ -78,91 +99,78 @@ CAPACITY_LIMIT = 480  # Max Piling Time per truck
 DISTANCE_LIMIT = 600  # Max Travel+Service Time per truck
 VEHICLES_COUNT = 74    # Increased to ensure feasibility
 NUM_RESIDENTIAL_NODES = 20
+```
 
-# 2. LOAD DATA
+## 1.3  Convert data types to geometry  
 
-df_edges = pd.read_csv(edge_path)
-df_nodes = pd.read_csv(node_path)
-df_depot = pd.read_csv(depot_path)
-df_critical = pd.read_csv(critical_path)
-
+```{python}
 # Convert WKT
 df_edges['geometry'] = df_edges['WKT'].apply(wkt.loads)
 df_nodes['geometry'] = df_nodes['WKT'].apply(wkt.loads)
 df_critical['geometry'] = df_critical['WKT'].apply(wkt.loads)
-
 # GeoDataFrames
 gdf_edges = gpd.GeoDataFrame(df_edges, geometry='geometry', crs="EPSG:4326")
 gdf_nodes = gpd.GeoDataFrame(df_nodes, geometry='geometry', crs="EPSG:4326")
 gdf_critical = gpd.GeoDataFrame(df_critical, geometry='geometry', crs="EPSG:4326")
-
 # Project to Meters
 gdf_edges_proj = gdf_edges.to_crs("EPSG:3857")
 gdf_nodes_proj = gdf_nodes.to_crs("EPSG:3857")
 ```
 
+# 2     PHASE 1: EXPEDITED CONNECTIVITY RESTORATION
+
+# 2.1   Identify blocked roads
+
 ```{python}
-
-# 3. IDENTIFY BLOCKED ROADS
-
 blocked_status = []
-
 with rasterio.open(raster_path) as src:
     # Reproject edges to match Raster CRS
     gdf_edges_raster_crs = gdf_edges.to_crs(src.crs)
-    
     # Calculate buffer (Rough approximation if Degrees, Exact if Meters)
     if src.res[0] < 0.1: 
         buffer_width = (ROAD_WIDTH_FT * 0.3048) / 111000 
     else: 
         buffer_width = (ROAD_WIDTH_FT * 0.3048) / 2
-
     for idx, row in gdf_edges_raster_crs.iterrows():
         try:
             road_geom = row['geometry'].buffer(buffer_width)
             out_image, _ = mask(src, [road_geom], crop=True)
-            
             valid_mask = out_image[0] >= 0
             if valid_mask.sum() == 0:
                 blocked_status.append(0)
                 continue
-
             debris_pixels = (out_image[0] > 0).sum()
             total_pixels = valid_mask.sum()
-            
             if (debris_pixels / total_pixels) >= BLOCKAGE_THRESHOLD:
                 blocked_status.append(1)
             else:
                 blocked_status.append(0)
         except:
             blocked_status.append(0)
-
 df_edges['blocked'] = blocked_status
+```
 
+# 2.2   Build initial path
 
-
+```{python}
 # 4. BUILD INITIAL GRAPH
-
 G_raw = nx.Graph()
-
 # Add all nodes first (to ensure ID existence)
 for osmid in df_nodes['osmid'].unique():
     G_raw.add_node(osmid)
-
 # Add edges with weights
 for idx, row in df_edges.iterrows():
     u, v = row['u'], row['v']
     # Calculate weight
     w = row['length'] / SPEED_METERS_PER_MIN
     if row['blocked'] == 1:
-        w += DEBRIS_TRAVEL_PENALTY_MIN
-    
+        w += DEBRIS_TRAVEL_PENALTY_MIN   
     # Add edge
     if G_raw.has_node(u) and G_raw.has_node(v):
         G_raw.add_edge(u, v, weight=w, blocked=row['blocked'])
+```
 
-
-
+```{python}
 # 5. CLEAN GRAPH (REMOVE ISOLATED NODES)
 
 print("Cleaning Graph (Removing Disconnected Islands)")
@@ -323,21 +331,17 @@ print(f"Residential Nodes (Random): {residential_ids}")
 print("="*30)
 ```
 
+RUN "RUN ABOVE" AT THIS CODE BLOCK
+```{python}
+print(f"Running Phase 1")
+```
 
 
-PHASE 2
+
+
+# 3     PHASE 2: CAPACITATED DEBRIS REMOVAL
 
 ```{python}
-import os
-import random
-import pandas as pd
-import geopandas as gpd
-import networkx as nx
-import rasterio
-from rasterio.mask import mask
-from shapely import wkt
-from shapely.geometry import Point
-
 # 1. SETUP & CONFIGURATION
 
 os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
@@ -579,45 +583,6 @@ for i in range(1, total_nodes + 1):
 
 
 
-# # 7. WRITE VRP FILE
-# print(f"Writing VRP to {output_vrp_path}...")
-
-# with open(output_vrp_path, 'w') as f:
-#     f.write("NAME : Phase2_Debris_Removal\n")
-#     f.write("COMMENT : CVRP, 20mph, Demand=CYD\n")
-#     f.write("TYPE : CVRP\n") # Simple CVRP now
-#     f.write(f"DIMENSION : {total_nodes}\n")
-#     f.write(f"CAPACITY : {CAPACITY_LIMIT}\n")
-#     f.write(f"DISTANCE : {DISTANCE_LIMIT}\n")
-#     f.write(f"VEHICLES : {VEHICLES_COUNT}\n")
-#     f.write("EDGE_WEIGHT_TYPE : EXPLICIT\n")
-#     f.write("EDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
-#     f.write("NODE_COORD_TYPE : TWOD_COORDS\n") # Added coords back for this phase if needed
-    
-#     f.write("NODE_COORD_SECTION\n")
-#     for i in range(1, total_nodes + 1):
-#         osmid = lkh_to_osmid[i]
-#         row = df_nodes[df_nodes['osmid'] == osmid].iloc[0]
-#         f.write(f"{i} {row['x']} {row['y']}\n")
-
-#     f.write("DEMAND_SECTION\n")
-#     for i in range(1, total_nodes + 1):
-#         # Round up to int for LKH standard, or keep float if supported (LKH prefers Int)
-#         # We will round up to nearest integer to be safe
-#         dem_int = int(final_demands[i]) if final_demands[i] > 0 else 0
-#         f.write(f"{i} {dem_int}\n")
-        
-#     f.write("DEPOT_SECTION\n")
-#     f.write(f"{depot_id}\n-1\n")
-    
-#     f.write("EDGE_WEIGHT_SECTION\n")
-#     for line in matrix_rows:
-#         f.write(f"{line}\n")
-#     f.write("EOF\n")
-
-# print("\nProcessing Complete.")
-# print(f"Phase 1 Record: {len(phase1_data)} nodes served.")
-# print(f"Phase 2 VRP Created. Total Net Debris: {sum(final_demands.values())} CYD")
 
 # 7. WRITE VRP FILE (DEBUGGED)
 
