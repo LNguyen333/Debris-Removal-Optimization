@@ -1,0 +1,294 @@
+---
+title: "1. LKH Solver"
+author: "Leanh Nguyen (Ln14)"
+jupyter: python3
+date: 2025-11-29
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+---
+
+{{< pagebreak >}}
+
+# Setting Up Data
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import numpy as np
+import scipy.stats as stats
+import os
+
+# --- SETUP (Same as before) ---
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+script_directory = os.path.dirname(__file__)
+Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
+load_path = os.path.join(Lee_County_path, 'Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv')
+df = pd.read_csv(load_path)
+
+# # --- MOCK DATA FOR DEMONSTRATION (Replace this with your actual file loading) ---
+# # I'm creating a dummy DF to simulate your 2022-2025 timeline
+# dates = pd.date_range(start='2022-10-01', end='2023-05-01', freq='D')
+# # Create a "spike" early on, then very low values for years
+# vol_early = np.random.normal(1000, 200, 180) # High volume first 6 months
+# vol_late = np.random.uniform(0, 50, len(dates)-180) # Low volume rest of time
+# cyd_data = np.concatenate([vol_early, vol_late])
+# # ensure no negative
+# cyd_data = np.abs(cyd_data) 
+# df = pd.DataFrame({'Disposal Date': dates, 'CYD': cyd_data})
+# -------------------------------------------------------------------------------
+
+# Ensure date format is correct and sorted
+df['Disposal Date'] = pd.to_datetime(df['Disposal Date'])
+df = df.sort_values('Disposal Date')
+
+# =========================================================
+# PART 1: Raw Data Histogram (Daily Bins over 3 Years)
+# =========================================================
+plt.figure(figsize=(15, 6)) # Wide figure for long timeline
+
+# Calculate exact number of days for bins
+min_date = mdates.date2num(df['Disposal Date'].min())
+max_date = mdates.date2num(df['Disposal Date'].max())
+days_span = int(max_date - min_date) + 1
+
+date_nums = mdates.date2num(df['Disposal Date'])
+
+# Plot Histogram with bins = total number of days
+plt.hist(date_nums, bins=days_span, weights=df['CYD'], 
+         color='skyblue', edgecolor='none', label='Daily Volume')
+
+plt.title('Raw Debris Timeline (2022 - 2025)')
+plt.ylabel('Cubic Yards (CYD)')
+plt.xlabel('Date')
+
+# X-Axis Formatting for Long Durations
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m')) # Show Year-Month
+# plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=3)) # Label every 3 months
+plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=2)) # Every 2 weeks
+plt.xticks(rotation=45)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# =========================================================
+# PART 2: Determine "Baseline Time" (Cut off the Long Tail)
+# =========================================================
+# We use Cumulative Volume to find when the "real work" was done.
+df['cumsum_cyd'] = df['CYD'].cumsum()
+total_volume = df['CYD'].sum()
+
+# 95% is the standard engineering threshold for "Substantial Completion"
+cutoff_percent = 0.95 
+cutoff_threshold = total_volume * cutoff_percent
+
+# Find the exact date we hit 95%
+cutoff_row = df[df['cumsum_cyd'] >= cutoff_threshold].iloc[0]
+cutoff_date = cutoff_row['Disposal Date']
+
+print(f"Total Volume: {total_volume:,.0f} CYD")
+print(f"95% Completion Date: {cutoff_date.date()}")
+print(f"This is your 'Baseline Completion Time'.")
+
+# Filter data to only include the "High Activity" phase
+df_filtered = df[df['Disposal Date'] <= cutoff_date].copy()
+
+# =========================================================
+# PART 3: Fit Distribution to the Active Phase
+# =========================================================
+plt.figure(figsize=(12, 6))
+
+# Recalculate bins for just the short period
+filt_min = mdates.date2num(df_filtered['Disposal Date'].min())
+filt_max = mdates.date2num(df_filtered['Disposal Date'].max())
+filt_span = int(filt_max - filt_min) + 1
+
+filtered_date_nums = mdates.date2num(df_filtered['Disposal Date'])
+
+# 1. Plot Histogram (Density=True for curve fitting)
+plt.hist(filtered_date_nums, bins=filt_span, weights=df_filtered['CYD'], 
+         density=True, alpha=0.5, color='green', label='Active Phase Data')
+
+# 2. Fit the Distribution
+# We calculate weighted stats to find the center of mass of the debris
+weighted_mean = np.average(filtered_date_nums, weights=df_filtered['CYD'])
+weighted_var = np.average((filtered_date_nums - weighted_mean)**2, weights=df_filtered['CYD'])
+weighted_std = np.sqrt(weighted_var)
+
+# Generate the curve
+x_line = np.linspace(filt_min, filt_max, 200)
+pdf = stats.norm.pdf(x_line, weighted_mean, weighted_std)
+
+plt.plot(x_line, pdf, 'k-', linewidth=2, label='Normal Dist (modeled baseline)')
+
+# 3. Add visuals to show the "Baseline Time"
+# Draw a vertical line where the user "should" have finished according to the curve
+# (Usually defined as Mean + 2 Sigma for ~97% confidence)
+theoretical_end = weighted_mean + (2 * weighted_std)
+# plt.axvline(theoretical_end, color='red', linestyle='--', label='Theoretical Completion (Mean + 2$\sigma$)')
+
+plt.title(f'Baseline Distribution (Oct 2022 - {cutoff_date.strftime("%b %Y")})')
+plt.xlabel('Date')
+plt.ylabel('Density')
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=2)) # Every 2 weeks
+plt.xticks(rotation=90)
+plt.legend()
+plt.tight_layout()
+plt.show()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import numpy as np
+import scipy.stats as stats
+
+# Set the current working directory to the project root if necessary
+os.chdir(r'C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization')
+
+# Get the directory where current Python script is located. This makes paths relative to the project's root
+script_directory = os.path.dirname(__file__)
+
+# Construct the path to 'input' folder relative to the script. Assumes 'input' folder is in the same (sub-)directory as script
+Lee_County_path = os.path.join(script_directory, 'input', 'LEE COUNTY')
+
+# Load debris load locations for entire Lee County
+load_path = os.path.join(Lee_County_path, 'Lee_Co_FOIA_Request_Load_Location_with_CYD_12.21.23.csv')
+df = pd.read_csv(load_path)
+
+# Ensure date format is correct
+df['Disposal Date'] = pd.to_datetime(df['Disposal Date'])
+df = df.sort_values('Disposal Date')
+
+# ---------------------------------------------------------
+# Part 1: Simple Histogram
+# ---------------------------------------------------------
+plt.figure(figsize=(10, 6))
+
+# We convert dates to numbers for plotting
+date_nums = mdates.date2num(df['Disposal Date'])
+
+# Plot: weights=df['CYD'] ensures the bar height represents VOLUME, not just truck count
+plt.hist(date_nums, bins=50, weights=df['CYD'], color='skyblue', edgecolor='black')
+
+plt.title('Debris Removal Timeline (Raw Data)')
+plt.xlabel('Date')
+plt.ylabel('Cubic Yards (CYD)')
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+# ---------------------------------------------------------
+# Part 2: Remove Outliers (The "95% Complete" Rule)
+# ---------------------------------------------------------
+# Calculate cumulative volume to find where the "main work" finished
+df['cumsum_cyd'] = df['CYD'].cumsum()
+total_volume = df['CYD'].sum()
+
+# Define cutoff (e.g., 95% or 99% of total volume)
+cutoff_percent = 0.95 
+cutoff_threshold = total_volume * cutoff_percent
+
+# Find the date where we crossed this threshold
+cutoff_row = df[df['cumsum_cyd'] >= cutoff_threshold].iloc[0]
+cutoff_date = cutoff_row['Disposal Date']
+
+print(f"Baseline Completion Date (95% Volume): {cutoff_date}")
+
+# Create new filtered dataset
+df_filtered = df[df['Disposal Date'] <= cutoff_date].copy()
+
+# ---------------------------------------------------------
+# Part 3: Plot Distribution / Fit Curve (Daily Resolution)
+# ---------------------------------------------------------
+plt.figure(figsize=(12, 6)) # Made figure slightly wider for daily detail
+
+# 1. Calculate the exact number of days to create "Per Day" bins
+# We find the min and max date to determine the span
+min_date = mdates.date2num(df_filtered['Disposal Date'].min())
+max_date = mdates.date2num(df_filtered['Disposal Date'].max())
+days_span = int(max_date - min_date) + 1 # +1 ensures the last day is included
+
+# Get numbers for filtered dates
+filtered_date_nums = mdates.date2num(df_filtered['Disposal Date'])
+
+# 2. Plot Histogram with Daily Bins
+# bins=days_span ensures 1 bin = 1 day
+plt.hist(filtered_date_nums, bins=days_span, weights=df_filtered['CYD'], 
+         density=True, alpha=0.6, color='green', label='Observed Data (Daily)')
+
+# 3. Fit Normal Distribution
+weighted_mean = np.average(filtered_date_nums, weights=df_filtered['CYD'])
+weighted_var = np.average((filtered_date_nums - weighted_mean)**2, weights=df_filtered['CYD'])
+weighted_std = np.sqrt(weighted_var)
+
+# Generate the bell curve line
+xmin, xmax = plt.xlim()
+x = np.linspace(xmin, xmax, 200) # Increased resolution for the line
+p = stats.norm.pdf(x, weighted_mean, weighted_std)
+
+plt.plot(x, p, 'k', linewidth=2, label='Normal Distribution Fit')
+
+# 4. Format X-Axis for Daily Visibility
+plt.title(f'Baseline Debris Removal Distribution\n(Daily Resolution - Outliers removed after {cutoff_date.date()})')
+plt.xlabel('Date')
+plt.ylabel('Probability Density (Volume Weighted)')
+
+# Set the formatter to Year-Month-Day
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+
+# LOCATOR: This controls how many text labels appear on the X-axis.
+# If the period is short (<60 days), show every day:
+# plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=1)) 
+
+# If the period is long (>60 days), show every Monday (interval=1) or every 7 days
+# This keeps the BARS daily, but prevents the TEXT from overlapping
+plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=1)) 
+
+plt.xticks(rotation=90) # Rotate 90 degrees to fit more dates
+plt.legend()
+plt.tight_layout()
+plt.show()
+```

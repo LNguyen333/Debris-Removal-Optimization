@@ -1,0 +1,4 @@
+PROBLEM_FILE = C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\rl_temp\rl_phase2.vrp
+RUNS = 1
+TOUR_FILE = C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\output\rl_temp\rl_phase2.tour
+TRACE_LEVEL = 1

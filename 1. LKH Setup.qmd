@@ -73,17 +73,17 @@ df_critical = pd.read_csv(critical_path)
 
 **User Inputs**
 
-- Current speed limit is                    10 mph 
-- Current travel time of a blocked road:    60 minutes
-- Road width:                               24 feet
-- Road blockage threshold:                  50%
+- Speed limit                       10 mph 
+- Travel time of a blocked road:    60 minutes
+- Road width:                       24 feet
+- Road blockage threshold:          50%
 
 **LKH Constraints**
 
-- Max time allowed for piling:  480 minutes
-- Max time allowed per truck:   600 minutes
-- Max number of trucks:         74
-- Number of residential nodes:  20
+- Max time allowed for piling:      480 minutes
+- Max time allowed per truck:       600 minutes
+- Max number of trucks:             74
+- Number of residential nodes:      20
 
 ```{python}
 # Parameters
@@ -181,9 +181,9 @@ G = G_raw.subgraph(largest_cc).copy()
 print(f"  > Original Nodes: {len(G_raw.nodes)}")
 print(f"  > Cleaned Nodes: {len(G.nodes)}")
 print(f"  > Removed {len(G_raw.nodes) - len(G.nodes)} unreachable nodes.")
+```
 
-
-
+```{python}
 # 6. RENUMBER NODES (OSMID -> 1..N)
 
 # We must re-index 1 to N based on the CLEANED graph
@@ -191,9 +191,9 @@ final_nodes = list(G.nodes())
 osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(final_nodes)}
 lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(final_nodes)}
 total_nodes = len(final_nodes)
+```
 
-
-
+```{python}
 # 7. MAP SPECIAL NODES (Depot/Critical/Res)
 
 # Helper: Find closest VALID node in the CLEANED graph
@@ -226,9 +226,10 @@ if len(available) < NUM_RESIDENTIAL_NODES:
     residential_ids = available
 else:
     residential_ids = random.sample(available, NUM_RESIDENTIAL_NODES)
+```
 
 
-
+```{python}
 # 8. GENERATE FULL COST MATRIX (APSP)
 
 # Because G is fully connected, we won't get infinite values here
@@ -331,7 +332,8 @@ print(f"Residential Nodes (Random): {residential_ids}")
 print("="*30)
 ```
 
-RUN "RUN ABOVE" AT THIS CODE BLOCK
+**CLICK "RUN ABOVE" AT THIS CODE BLOCK**
+
 ```{python}
 print(f"Running Phase 1")
 ```

@@ -1,0 +1,1540 @@
+---
+title: "1. LKH Setup"
+author: "Leanh Nguyen (Ln14)"
+
+date: 2025-11-28
+
+format: 
+    html: default
+
+    # YOU DO NOT NEED BOTH PDF AND DOCX.
+    # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
+    # pdf:
+    #     documentclass: article
+    #     fontsize: 11pt
+    #     geometry:
+    #         - margin=1in  
+    #     number-sections: true
+    #     code-line-numbers: true
+    docx: 
+       toc: true
+       fig-format: png
+       number-sections: true
+       code-line-numbers: true
+
+date-format: "ddd., MMM. D"
+# bibliography: references.bib
+
+# recommended, but not required
+# you will need jupyter-cache installed
+execute: 
+  cache: true
+  freeze: auto
+  jupyter: python3
+---
+
+{{< pagebreak >}}
+
+# 1     SETUP AND CONFIGURATION
+
+## 1.1  Import libraries, input, and output directories
+
+pip install torch torchvision torchaudio
+
+```{python}
+import os
+import subprocess
+import re
+import pandas as pd
+import numpy as np
+import networkx as nx
+import torch
+import torch.nn as nn
+from torch.distributions import Categorical
+from dataclasses import dataclass
+from typing import List, Tuple
+import csv
+
+# ==========================================
+# 0. CONFIGURATION & PATHS
+# ==========================================
+BASE_DIR = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization"
+INPUT_DIR = os.path.join(BASE_DIR, "input", "QGIS", "focus area test")
+TEMP_DIR = os.path.join(BASE_DIR, "output", "rl_temp")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output", "1. Setup", "focus area test")
+LKH_EXE = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+
+# Input Files
+EDGE_PATH = os.path.join(INPUT_DIR, "focus_area_edges.csv")
+NODE_PATH = os.path.join(INPUT_DIR, "focus_area_nodes.csv")
+DEPOT_PATH = os.path.join(INPUT_DIR, "focus_area_dms.csv")
+
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# ------------------------------------------
+# PHASE 1 RESOURCES (The Agent's Budget)
+# ------------------------------------------
+K_TRUCKS_PHASE1 = 5
+C_CAPACITY_PHASE1 = 180  # 3 hours piling time
+TOTAL_BUDGET_MINS = K_TRUCKS_PHASE1 * C_CAPACITY_PHASE1
+COST_PER_NODE_SERVICE = 60 
+
+# ------------------------------------------
+# PHASE 2 RESOURCES (Virtual Truck Logic)
+# ------------------------------------------
+PHYSICAL_TRUCKS_PHASE2 = 10
+WORKDAY_HOURS = 10
+MAX_TRIP_HOURS = 1.5  # Max time for 1 load (Drive -> Dump -> Return)
+
+# Calculate Virtual Vehicles (Total Trips allowed in a day)
+# Example: 10 trucks * (10hr / 1.5hr) = 10 * 6 = 60 Virtual Vehicles
+TRIPS_PER_TRUCK = int(WORKDAY_HOURS / MAX_TRIP_HOURS)
+VEHICLES_PHASE2 = PHYSICAL_TRUCKS_PHASE2 * TRIPS_PER_TRUCK
+
+# Distance Constraint is per TRIP, not per day
+DISTANCE_LIMIT_SEC = int(MAX_TRIP_HOURS * 3600) 
+
+# Capacity per Trip (Volume of 1 Truck)
+CAPACITY_PER_TRIP = 30 
+
+print(f"--- PHASE 2 CONFIGURATION ---")
+print(f"Physical Trucks: {PHYSICAL_TRUCKS_PHASE2}")
+print(f"Workday: {WORKDAY_HOURS} hrs | Max Trip: {MAX_TRIP_HOURS} hrs")
+print(f"Virtual Vehicles (Trips): {VEHICLES_PHASE2}")
+print(f"Distance Limit per Route: {DISTANCE_LIMIT_SEC} seconds")
+print(f"-----------------------------")
+
+# ==========================================
+# 1. REAL WORLD ENVIRONMENT
+# ==========================================
+class RealWorldEnv:
+    def __init__(self):
+        print("Loading and Cleaning Network Data...")
+        self.df_edges = pd.read_csv(EDGE_PATH)
+        self.df_nodes = pd.read_csv(NODE_PATH)
+        self.df_depot = pd.read_csv(DEPOT_PATH)
+
+        # --- GRAPH CLEANING ---
+        G_raw = nx.Graph()
+        # Add ALL nodes from node file to ensure no ID gaps
+        for osmid in self.df_nodes['osmid'].unique():
+            G_raw.add_node(osmid)
+            
+        for idx, row in self.df_edges.iterrows():
+            G_raw.add_edge(row['u'], row['v'], length=row['length']) 
+
+        largest_cc = max(nx.connected_components(G_raw), key=len)
+        self.G_clean = G_raw.subgraph(largest_cc).copy()
+        
+        self.valid_osmids = list(self.G_clean.nodes())
+        self.num_nodes = len(self.valid_osmids)
+        self.osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(self.valid_osmids)}
+        self.lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(self.valid_osmids)}
+        
+        # Identify Depot
+        # Check if Depot OSMID exists in clean graph, otherwise pick Node 1
+        # (You should update this logic to find nearest node to depot coords if needed)
+        self.depot_id = 5 
+        if 5 not in self.lkh_to_osmid: 
+             self.depot_id = 1
+
+        self.SPEED_CLEAN = (20 * 1609.34) / 3600  
+        self.SPEED_DIRTY = (10 * 1609.34) / 3600 
+        self.PENALTY = 3600 
+
+        print(f"  > Cleaned Graph: {self.num_nodes} Nodes.")
+
+    def get_phase2_matrix_and_solve(self, selected_node_indices: List[int]) -> float:
+        # A. Modify Weights
+        G_sim = nx.Graph()
+        serviced_lkh_ids = set([idx + 1 for idx in selected_node_indices])
+
+        for u_osmid, v_osmid, data in self.G_clean.edges(data=True):
+            u_lkh = self.osmid_to_lkh[u_osmid]
+            v_lkh = self.osmid_to_lkh[v_osmid]
+            
+            is_serviced = (u_lkh in serviced_lkh_ids) or (v_lkh in serviced_lkh_ids)
+            dist = data.get('length', 100)
+            
+            if is_serviced:
+                weight = dist / self.SPEED_CLEAN
+            else:
+                weight = (dist / self.SPEED_DIRTY) + self.PENALTY
+            
+            G_sim.add_edge(u_lkh, v_lkh, weight=max(1, int(weight)))
+
+        # B. Calculate Matrix (APSP)
+        matrix_lines = []
+        for i in range(1, self.num_nodes + 1):
+            if i in G_sim:
+                dists = nx.single_source_dijkstra_path_length(G_sim, i, weight='weight')
+                row = [str(int(dists.get(j, 999999))) if i != j else "0" for j in range(1, self.num_nodes + 1)]
+            else:
+                row = ["999999"] * self.num_nodes
+            matrix_lines.append(" ".join(row))
+
+        # C. Write VRP File
+        vrp_path = os.path.join(TEMP_DIR, "rl_phase2.vrp")
+        # Use absolute path for PAR file to avoid LKH finding issues
+        vrp_abs_path = os.path.abspath(vrp_path)
+        
+        with open(vrp_path, "w") as f:
+            f.write(f"NAME : RL_Simulation\nTYPE : CVRP\nDIMENSION : {self.num_nodes}\n")
+            f.write(f"VEHICLES : {VEHICLES_PHASE2}\nCAPACITY : {CAPACITY_PER_TRIP}\n")
+            f.write(f"DISTANCE : {DISTANCE_LIMIT_SEC}\n") 
+            f.write("EDGE_WEIGHT_TYPE : EXPLICIT\nEDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+            f.write(f"DEPOT_SECTION\n{self.depot_id}\n-1\nDEMAND_SECTION\n")
+            
+            # Demand Logic: 
+            # We must assign demand. If nodes have 0 demand, LKH ignores them.
+            # Let's assume a uniform demand or read from file.
+            # Since Capacity is 30, let's give nodes demand of 5 (so 1 truck can visit 6 nodes)
+            for i in range(1, self.num_nodes + 1): f.write(f"{i} 5\n")
+            
+            f.write("EDGE_WEIGHT_SECTION\n")
+            f.write("\n".join(matrix_lines))
+            f.write("\nEOF")
+
+        # D. Run LKH
+        par_path = os.path.join(TEMP_DIR, "rl_phase2.par")
+        tour_path = os.path.join(TEMP_DIR, "rl_phase2.tour")
+        tour_abs_path = os.path.abspath(tour_path)
+        
+        with open(par_path, "w") as f:
+            f.write(f"PROBLEM_FILE = {vrp_abs_path}\nRUNS = 1\nTOUR_FILE = {tour_abs_path}\nTRACE_LEVEL = 1\n")
+
+        try:
+            # We must pass the FULL PATH to the PAR file
+            par_abs_path = os.path.abspath(par_path)
+            
+            # Run LKH and capture ALL output for debugging
+            result = subprocess.run([LKH_EXE, par_abs_path], capture_output=True, text=True)
+            
+            # Look for Cost
+            match = re.search(r"Cost.[\s]*(\d+)", result.stdout)
+            
+            if match:
+                cost = float(match.group(1))
+                # If cost > 100 hours (360,000 sec), likely infeasible/teleport
+                if cost > 360000: 
+                    # Don't fail, just penalize
+                    return cost 
+                return cost
+            else:
+                # PRINT ERROR LOG
+                print("\n" + "="*20 + " LKH FAILURE LOG " + "="*20)
+                print(result.stdout)
+                print("="*60 + "\n")
+                return 1e9
+        except Exception as e:
+            print(f"  > EXECUTION ERROR: {e}")
+            return 1e9
+
+    def save_best_routes(self):
+        """Copies the current tour file to permanent location"""
+        src = os.path.join(TEMP_DIR, "rl_phase2.tour")
+        dst = os.path.join(OUTPUT_DIR, "best_solution_routes.csv")
+        try:
+            with open(src, 'r') as f: lines = f.readlines()
+            tour = []
+            reading = False
+            for line in lines:
+                if "TOUR_SECTION" in line: reading = True; continue
+                if "-1" in line: break
+                if reading: tour.append(int(line.strip()))
+            
+            with open(dst, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Vehicle_ID", "Step_Order", "LKH_Node_ID"])
+                vid, step = 1, 0
+                for node in tour:
+                    if node == self.depot_id:
+                        if step > 0: # End of previous route
+                            writer.writerow([vid, step+1, self.depot_id])
+                            vid += 1
+                            step = 0
+                        # Start of new route
+                        writer.writerow([vid, 0, self.depot_id])
+                    else:
+                        step += 1
+                        writer.writerow([vid, step, node])
+        except:
+            pass
+
+# ==========================================
+# 2. POLICY NETWORK
+# ==========================================
+class NodeSelectionPolicy(nn.Module):
+    def __init__(self, num_nodes: int): 
+        super().__init__()
+        self.logits = nn.Parameter(torch.zeros(num_nodes))
+
+    def forward(self, available_mask: torch.Tensor) -> Categorical:
+        masked_logits = self.logits.clone()
+        masked_logits[~available_mask] = -1e9
+        return Categorical(logits=masked_logits)
+
+# ==========================================
+# 3. EPISODE RUNNER
+# ==========================================
+def run_episode(env, policy, budget_mins, cost_per_node):
+    K = max(1, int(budget_mins / cost_per_node))
+    available = torch.ones(env.num_nodes, dtype=torch.bool)
+    available[env.depot_id - 1] = False
+    
+    actions = []
+    log_probs = []
+
+    for _ in range(K):
+        dist = policy(available)
+        action = dist.sample()
+        log_probs.append(dist.log_prob(action))
+        actions.append(int(action.item()))
+        available[action] = False
+
+    total_cost = env.get_phase2_matrix_and_solve(actions)
+    
+    reward = torch.tensor(-(total_cost / 1000.0), dtype=torch.float32)
+    log_prob_sum = torch.stack(log_probs).sum()
+    
+    return log_prob_sum, reward, total_cost
+
+# ==========================================
+# 4. TRAINING LOOP
+# ==========================================
+def train_two_stage_vrp(num_episodes=50, print_every=5, seed=42):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    
+    env = RealWorldEnv()
+    
+    # CALCULATE BASELINE (NO PHASE 1)
+    print("Calculating Baseline Cost (0 Phase 1 Nodes)...")
+    baseline_cost = env.get_phase2_matrix_and_solve([])
+    print(f"  > Initial Baseline Cost: {baseline_cost:,.0f} seconds")
+    
+    policy = NodeSelectionPolicy(num_nodes=env.num_nodes)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=0.05)
+    
+    baseline = None
+    best_eval_cost = float('inf')
+
+    print(f"--- Starting Training ({num_episodes} Episodes) ---")
+
+    for episode in range(1, num_episodes + 1):
+        optimizer.zero_grad()
+        
+        log_prob_sum, reward, cost_val = run_episode(
+            env, policy, TOTAL_BUDGET_MINS, COST_PER_NODE_SERVICE
+        )
+
+        # REINFORCE Update
+        r = reward.item()
+        if baseline is None: baseline = r
+        else: baseline = 0.9 * baseline + 0.1 * r
+
+        loss = -log_prob_sum * (reward - baseline)
+        loss.backward()
+        optimizer.step()
+
+        # Save Best
+        if cost_val < best_eval_cost:
+            best_eval_cost = cost_val
+            env.save_best_routes() # Save csv
+
+        if episode % print_every == 0 or episode == 1:
+            print(f"Ep {episode:3d} | Cost: {cost_val:9,.0f} | Best: {best_eval_cost:9,.0f} | Reward: {r:.2f}")
+
+if __name__ == "__main__":
+    train_two_stage_vrp(num_episodes=50, print_every=1)
+```
+
+
+```{python}
+import os
+import subprocess
+import re
+import pandas as pd
+import numpy as np
+import networkx as nx
+import torch
+import torch.nn as nn
+from torch.distributions import Categorical
+from dataclasses import dataclass
+from typing import List, Tuple
+import csv
+
+# ==========================================
+# 0. CONFIGURATION & PATHS
+# ==========================================
+BASE_DIR = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization"
+INPUT_DIR = os.path.join(BASE_DIR, "input", "QGIS", "focus area test")
+TEMP_DIR = os.path.join(BASE_DIR, "output", "rl_temp")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output", "1. Setup", "focus area test")
+LKH_EXE = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+
+# Input Files
+EDGE_PATH = os.path.join(INPUT_DIR, "focus_area_edges.csv")
+NODE_PATH = os.path.join(INPUT_DIR, "focus_area_nodes.csv")
+DEPOT_PATH = os.path.join(INPUT_DIR, "focus_area_dms.csv")
+LOAD_PATH = os.path.join(INPUT_DIR, "focus_area_loads.csv") 
+
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# Optimization Constraints
+K_TRUCKS_PHASE1 = 74
+C_CAPACITY_PHASE1 = 180  # 3 hours piling time
+TOTAL_BUDGET_MINS = K_TRUCKS_PHASE1 * C_CAPACITY_PHASE1
+COST_PER_NODE_SERVICE = 60 
+
+# Phase 2 LKH Settings
+VEHICLES_PHASE2 = 74
+CAPACITY_PHASE2 = 10000 # High enough to fit max demand
+# We set this HUGE so LKH never fails. We want to minimize the result, not cap it.
+DISTANCE_LIMIT_PHASE2 = 1000000000 
+
+# ==========================================
+# 1. REAL WORLD ENVIRONMENT
+# ==========================================
+class RealWorldEnv:
+    def __init__(self):
+        print("Loading and Cleaning Network Data...")
+        self.df_edges = pd.read_csv(EDGE_PATH)
+        self.df_nodes = pd.read_csv(NODE_PATH)
+        self.df_depot = pd.read_csv(DEPOT_PATH)
+
+        # --- GRAPH CLEANING ---
+        G_raw = nx.Graph()
+        for idx, row in self.df_edges.iterrows():
+            G_raw.add_edge(row['u'], row['v'], length=row['length']) 
+
+        largest_cc = max(nx.connected_components(G_raw), key=len)
+        self.G_clean = G_raw.subgraph(largest_cc).copy()
+        
+        self.valid_osmids = list(self.G_clean.nodes())
+        self.num_nodes = len(self.valid_osmids)
+        self.osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(self.valid_osmids)}
+        self.lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(self.valid_osmids)}
+        
+        # Hardcoded Depot ID 5 (Ensure this ID exists in the clean graph!)
+        # If ID 5 was removed during cleaning, we default to 1
+        if 5 in self.lkh_to_osmid:
+            self.depot_id = 5
+        else:
+            self.depot_id = 1
+            print(f"  > WARNING: Depot ID 5 was invalid. Defaulting to {self.depot_id}")
+
+        self.SPEED_CLEAN = (20 * 1609.34) / 3600  
+        self.SPEED_DIRTY = (10 * 1609.34) / 3600 
+        self.PENALTY = 3600 
+
+        print(f"  > Cleaned Graph: {self.num_nodes} Nodes.")
+
+    def get_phase2_matrix_and_solve(self, selected_node_indices: List[int]) -> float:
+        # A. Modify Weights
+        G_sim = nx.Graph()
+        serviced_lkh_ids = set([idx + 1 for idx in selected_node_indices])
+
+        for u_osmid, v_osmid, data in self.G_clean.edges(data=True):
+            u_lkh = self.osmid_to_lkh[u_osmid]
+            v_lkh = self.osmid_to_lkh[v_osmid]
+            
+            is_serviced = (u_lkh in serviced_lkh_ids) or (v_lkh in serviced_lkh_ids)
+            dist = data.get('length', 100)
+            
+            if is_serviced:
+                weight = dist / self.SPEED_CLEAN
+            else:
+                weight = (dist / self.SPEED_DIRTY) + self.PENALTY
+            
+            G_sim.add_edge(u_lkh, v_lkh, weight=max(1, int(weight)))
+
+        # B. Calculate Matrix
+        matrix_lines = []
+        for i in range(1, self.num_nodes + 1):
+            dists = nx.single_source_dijkstra_path_length(G_sim, i, weight='weight')
+            row = [str(int(dists.get(j, 999999))) if i != j else "0" for j in range(1, self.num_nodes + 1)]
+            matrix_lines.append(" ".join(row))
+
+        # C. Write VRP File
+        vrp_path = os.path.join(TEMP_DIR, "rl_phase2.vrp")
+        with open(vrp_path, "w") as f:
+            f.write(f"NAME : RL_Simulation\nTYPE : CVRP\nDIMENSION : {self.num_nodes}\n")
+            f.write(f"VEHICLES : {VEHICLES_PHASE2}\nCAPACITY : {CAPACITY_PHASE2}\n")
+            f.write(f"DISTANCE : {DISTANCE_LIMIT_PHASE2}\n") 
+            f.write("EDGE_WEIGHT_TYPE : EXPLICIT\nEDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+            f.write(f"DEPOT_SECTION\n{self.depot_id}\n-1\nDEMAND_SECTION\n")
+            # Using Dummy Demand 10 to ensure feasibility
+            for i in range(1, self.num_nodes + 1): f.write(f"{i} 10\n")
+            f.write("EDGE_WEIGHT_SECTION\n")
+            f.write("\n".join(matrix_lines))
+            f.write("\nEOF")
+
+        # D. Run LKH with Error Checking
+        par_path = os.path.join(TEMP_DIR, "rl_phase2.par")
+        tour_path = os.path.join(TEMP_DIR, "rl_phase2.tour")
+        with open(par_path, "w") as f:
+            f.write(f"PROBLEM_FILE = {vrp_path}\nRUNS = 1\nTOUR_FILE = {tour_path}\nTRACE_LEVEL = 0\n")
+
+        try:
+            result = subprocess.run([LKH_EXE, par_path], capture_output=True, text=True)
+            match = re.search(r"Cost.[\s]*(\d+)", result.stdout)
+            
+            if match:
+                cost = float(match.group(1))
+                # Validate reasonable cost (if > 500 million, treat as error)
+                if cost > 500000000:
+                    print("  > WARNING: LKH returned huge cost. Check Constraints.")
+                    return 1e9
+                return cost
+            else:
+                # DEBUG: Print LKH output if it fails
+                print(f"  > LKH FAILED. Output Snippet:\n{result.stdout[:200]}")
+                return 1e9
+        except Exception as e:
+            print(f"  > EXECUTION ERROR: {e}")
+            return 1e9
+
+    def save_best_routes(self):
+        """Copies the current tour file to permanent location"""
+        src = os.path.join(TEMP_DIR, "rl_phase2.tour")
+        dst = os.path.join(OUTPUT_DIR, "best_solution_routes.csv")
+        try:
+            with open(src, 'r') as f: lines = f.readlines()
+            tour = []
+            reading = False
+            for line in lines:
+                if "TOUR_SECTION" in line: reading = True; continue
+                if "-1" in line: break
+                if reading: tour.append(int(line.strip()))
+            
+            with open(dst, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Vehicle_ID", "Step_Order", "LKH_Node_ID"])
+                vid, step = 1, 0
+                for node in tour:
+                    if node == self.depot_id and step > 0:
+                        writer.writerow([vid, step+1, self.depot_id])
+                        vid += 1
+                        step = 0
+                    elif node == self.depot_id and step == 0:
+                        writer.writerow([vid, 0, self.depot_id])
+                    else:
+                        step += 1
+                        writer.writerow([vid, step, node])
+        except:
+            pass
+
+# ==========================================
+# 2. POLICY NETWORK
+# ==========================================
+class NodeSelectionPolicy(nn.Module):
+    def __init__(self, num_nodes: int): 
+        super().__init__()
+        self.logits = nn.Parameter(torch.zeros(num_nodes))
+
+    def forward(self, available_mask: torch.Tensor) -> Categorical:
+        masked_logits = self.logits.clone()
+        masked_logits[~available_mask] = -1e9
+        return Categorical(logits=masked_logits)
+
+# ==========================================
+# 3. EPISODE RUNNER
+# ==========================================
+def run_episode(env, policy, budget_mins, cost_per_node):
+    K = max(1, int(budget_mins / cost_per_node))
+    available = torch.ones(env.num_nodes, dtype=torch.bool)
+    available[env.depot_id - 1] = False
+    
+    actions = []
+    log_probs = []
+
+    for _ in range(K):
+        dist = policy(available)
+        action = dist.sample()
+        log_probs.append(dist.log_prob(action))
+        actions.append(int(action.item()))
+        available[action] = False
+
+    total_cost = env.get_phase2_matrix_and_solve(actions)
+    
+    # Reward Scaling
+    # If Cost is 200,000 seconds, reward is -200.0
+    reward = torch.tensor(-(total_cost / 1000.0), dtype=torch.float32)
+    log_prob_sum = torch.stack(log_probs).sum()
+    
+    return log_prob_sum, reward, total_cost
+
+# ==========================================
+# 4. TRAINING LOOP
+# ==========================================
+def train_two_stage_vrp(num_episodes=50, print_every=5, seed=42):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    
+    env = RealWorldEnv()
+    
+    # CALCULATE BASELINE (NO PHASE 1)
+    print("Calculating Baseline Cost (0 Phase 1 Nodes)...")
+    baseline_cost = env.get_phase2_matrix_and_solve([])
+    print(f"  > Initial Baseline Cost: {baseline_cost:,.0f} seconds")
+    
+    policy = NodeSelectionPolicy(num_nodes=env.num_nodes)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=0.05)
+    
+    baseline = None
+    best_eval_cost = float('inf')
+
+    print(f"--- Starting Training ({num_episodes} Episodes) ---")
+
+    for episode in range(1, num_episodes + 1):
+        optimizer.zero_grad()
+        
+        log_prob_sum, reward, cost_val = run_episode(
+            env, policy, TOTAL_BUDGET_MINS, COST_PER_NODE_SERVICE
+        )
+
+        # REINFORCE Update
+        r = reward.item()
+        if baseline is None: baseline = r
+        else: baseline = 0.9 * baseline + 0.1 * r
+
+        loss = -log_prob_sum * (reward - baseline)
+        loss.backward()
+        optimizer.step()
+
+        # Save Best
+        if cost_val < best_eval_cost:
+            best_eval_cost = cost_val
+            env.save_best_routes() # Save csv
+
+        if episode % print_every == 0 or episode == 1:
+            print(f"Ep {episode:3d} | Cost: {cost_val:9,.0f} | Best: {best_eval_cost:9,.0f} | Reward: {r:.2f}")
+
+if __name__ == "__main__":
+    train_two_stage_vrp(num_episodes=50, print_every=1)
+```
+
+
+```{python}
+# Import
+import os
+import subprocess
+import re
+import pandas as pd
+import numpy as np
+import networkx as nx
+import torch
+import torch.nn as nn
+from torch.distributions import Categorical
+from dataclasses import dataclass
+from typing import List, Tuple
+```
+
+```{python}
+
+# ==========================================
+# 0. CONFIGURATION & PATHS
+# ==========================================
+BASE_DIR = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization"
+INPUT_DIR = os.path.join(BASE_DIR, "input", "QGIS", "focus area test")
+TEMP_DIR = os.path.join(BASE_DIR, "output", "rl_temp")
+LKH_EXE = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+
+# Input Files (From LKH Setup)
+EDGE_PATH = os.path.join(INPUT_DIR, "focus_area_edges.csv")
+NODE_PATH = os.path.join(INPUT_DIR, "focus_area_nodes.csv")
+DEPOT_PATH = os.path.join(INPUT_DIR, "focus_area_dms.csv")
+
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# Phase 1 Resources (Variables to Optimize)
+# k = Trucks, c = Capacity (Time in Minutes) per truck
+# Total Budget = k * c
+K_TRUCKS_PHASE1 = 5
+C_CAPACITY_PHASE1 = 180  # 3 hours of piling time per truck
+TOTAL_BUDGET_MINS = K_TRUCKS_PHASE1 * C_CAPACITY_PHASE1
+
+# Debris Piling Cost (How much budget does 1 node cost?)
+# We assume clearing a node takes 60 mins on average
+COST_PER_NODE_SERVICE = 60 
+```
+
+```{python}
+
+
+# 1. REAL WORLD ENVIRONMENT (Replaces 'VRPInstance')
+# ==========================================
+class RealWorldEnv:
+    def __init__(self):
+        print("Loading Real Network Data...")
+        self.df_edges = pd.read_csv(EDGE_PATH)
+        self.df_nodes = pd.read_csv(NODE_PATH)
+        self.df_depot = pd.read_csv(DEPOT_PATH)
+
+        # Map IDs
+        self.osmids = self.df_nodes['osmid'].unique()
+        self.num_nodes = len(self.osmids)
+        self.osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(self.osmids)}
+        self.lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(self.osmids)}
+        
+        # Identify Depot (ID 5)
+        self.depot_id = 5 
+
+        # Speed Constants (Seconds)
+        # Phase 2 Speed: 20mph (Clean), 10mph (Blocked) + 60min Penalty
+        self.SPEED_CLEAN = (20 * 1609.34) / 3600  
+        self.SPEED_DIRTY = (10 * 1609.34) / 3600 
+        self.PENALTY = 3600 
+
+    def get_phase2_matrix_and_solve(self, selected_node_indices: List[int]) -> float:
+        """
+        Equivalent to 'solve_vrp_greedy_with_matrix' but uses LKH.
+        1. Modifies Graph based on selected Phase 1 nodes.
+        2. Runs LKH.
+        3. Returns Total Cost (Time in Seconds).
+        """
+        # A. Modify Graph (Phase 1 Interaction)
+        G = nx.Graph()
+        # Convert 0-based indices (from Policy) to 1-based LKH IDs
+        serviced_lkh_ids = set([idx + 1 for idx in selected_node_indices])
+
+        for _, row in self.df_edges.iterrows():
+            if row['u'] in self.osmid_to_lkh and row['v'] in self.osmid_to_lkh:
+                u = self.osmid_to_lkh[row['u']]
+                v = self.osmid_to_lkh[row['v']]
+                
+                # LOGIC: If a node is serviced in Phase 1, edges touching it become CLEAN
+                is_serviced = (u in serviced_lkh_ids) or (v in serviced_lkh_ids)
+                
+                dist = row['length']
+                
+                if is_serviced:
+                    # Debris Removed: Fast Speed
+                    weight = dist / self.SPEED_CLEAN
+                else:
+                    # Debris Remains: Check Blocked Status
+                    # Assuming CSV has 'blocked' from Setup. If not, treat as clean or random.
+                    is_blocked = row.get('blocked', 0) 
+                    if is_blocked == 1:
+                        weight = (dist / self.SPEED_DIRTY) + self.PENALTY
+                    else:
+                        weight = dist / self.SPEED_CLEAN
+                
+                G.add_edge(u, v, weight=max(1, int(weight)))
+
+        # B. Calculate Matrix (All-Pairs Shortest Path)
+        # Needed for LKH input
+        matrix_lines = []
+        for i in range(1, self.num_nodes + 1):
+            if i in G:
+                dists = nx.single_source_dijkstra_path_length(G, i, weight='weight')
+                row = [str(int(dists.get(j, 999999))) if i != j else "0" for j in range(1, self.num_nodes + 1)]
+            else:
+                row = ["999999"] * self.num_nodes
+            matrix_lines.append(" ".join(row))
+
+        # C. Write VRP File
+        vrp_path = os.path.join(TEMP_DIR, "rl_phase2.vrp")
+        with open(vrp_path, "w") as f:
+            f.write(f"NAME : RL_Simulation\nTYPE : CVRP\nDIMENSION : {self.num_nodes}\n")
+            f.write(f"VEHICLES : 5\nCAPACITY : 2000\nDISTANCE : 10000000\n") 
+            f.write("EDGE_WEIGHT_TYPE : EXPLICIT\nEDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+            f.write("DEPOT_SECTION\n5\n-1\nDEMAND_SECTION\n")
+            # Minimal demand to force routing
+            for i in range(1, self.num_nodes + 1): f.write(f"{i} 10\n")
+            f.write("EDGE_WEIGHT_SECTION\n")
+            f.write("\n".join(matrix_lines))
+            f.write("\nEOF")
+
+        # D. Run LKH
+        par_path = os.path.join(TEMP_DIR, "rl_phase2.par")
+        tour_path = os.path.join(TEMP_DIR, "rl_phase2.tour")
+        with open(par_path, "w") as f:
+            f.write(f"PROBLEM_FILE = {vrp_path}\nRUNS = 1\nTOUR_FILE = {tour_path}\nTRACE_LEVEL = 0\n")
+
+        try:
+            # Run LKH
+            result = subprocess.run([LKH_EXE, par_path], capture_output=True, text=True)
+            # Extract Cost
+            match = re.search(r"Cost.[\s]*(\d+)", result.stdout)
+            if match:
+                return float(match.group(1))
+            return 1e9 # Penalty for failure
+        except:
+            return 1e9
+```
+
+```{python}
+
+
+# ==========================================
+# 2. POLICY NETWORK
+# ==========================================
+class NodeSelectionPolicy(nn.Module):
+    # Changed argument to 'num_nodes' to match the Environment
+    def __init__(self, num_nodes: int): 
+        super().__init__()
+        # Learnable weights for each node
+        self.logits = nn.Parameter(torch.zeros(num_nodes))
+
+    def forward(self, available_mask: torch.Tensor) -> Categorical:
+        masked_logits = self.logits.clone()
+        masked_logits[~available_mask] = -1e9
+        return Categorical(logits=masked_logits)
+
+# ==========================================
+# 3. EPISODE RUNNER
+# ==========================================
+def run_episode(
+    env: RealWorldEnv,
+    policy: NodeSelectionPolicy,
+    budget_mins: float, 
+    cost_per_node: float
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    # Calculate how many nodes we can afford to service
+    # K = Total Phase 1 Mins / Mins per Node
+    K = max(1, int(budget_mins / cost_per_node))
+    
+    available = torch.ones(env.num_nodes, dtype=torch.bool)
+    # Don't select Depot (Index corresponds to depot_id - 1)
+    available[env.depot_id - 1] = False
+    
+    actions = []
+    log_probs = []
+
+    # Phase 1: Select K nodes to service
+    for _ in range(K):
+        dist = policy(available)
+        action = dist.sample()
+        
+        log_probs.append(dist.log_prob(action))
+        actions.append(int(action.item()))
+        
+        # Mask so we don't pick same node twice
+        available[action] = False
+
+    # Phase 2: Solve with LKH (Black Box)
+    total_cost = env.get_phase2_matrix_and_solve(actions)
+    
+    # Reward Logic
+    if total_cost >= 1e9:
+        # If solver failed, give large negative reward to punish this selection
+        reward = torch.tensor(-10000.0, dtype=torch.float32)
+    else:
+        # Reward = Negative Cost (Minimize Time)
+        # Scale down by 1000 to keep gradient numbers small
+        reward = torch.tensor(-(total_cost / 1000.0), dtype=torch.float32)
+
+    log_prob_sum = torch.stack(log_probs).sum()
+    return log_prob_sum, reward
+
+# ==========================================
+# 4. TRAINING LOOP
+# ==========================================
+def train_two_stage_vrp(num_episodes=200, print_every=10, seed=42):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    
+    # Init Environment
+    env = RealWorldEnv()
+    
+    # --- CRITICAL CONFIG FIX ---
+    # Increase the Distance Limit for the solver slightly 
+    # to prevent "1,000,000,000" errors during early training
+    # 24 Hours (86400 seconds) instead of 12
+    global DISTANCE_LIMIT_SEC 
+    DISTANCE_LIMIT_SEC = 86400 
+    
+    # Init Policy
+    # FIX: We pass 'num_nodes' here to match the class definition
+    policy = NodeSelectionPolicy(num_nodes=env.num_nodes)
+    
+    optimizer = torch.optim.Adam(policy.parameters(), lr=0.05) # Learning Rate
+    
+    baseline = None
+
+    print(f"--- Starting Training Loop ({num_episodes} Episodes) ---")
+
+    for episode in range(1, num_episodes + 1):
+        optimizer.zero_grad()
+        
+        log_prob_sum, reward = run_episode(
+            env, 
+            policy, 
+            budget_mins=TOTAL_BUDGET_MINS, 
+            cost_per_node=COST_PER_NODE_SERVICE
+        )
+
+        # REINFORCE with Baseline
+        r = reward.item()
+        if baseline is None:
+            baseline = r
+        else:
+            baseline = 0.9 * baseline + 0.1 * r
+
+        advantage = reward - baseline
+        loss = -log_prob_sum * advantage
+        loss.backward()
+        optimizer.step()
+
+        # Logging
+        if episode % print_every == 0 or episode == 1:
+            with torch.no_grad():
+                # Extract best nodes based on current policy weights
+                logits = policy.logits.detach().cpu().numpy()
+                K = max(1, int(TOTAL_BUDGET_MINS / COST_PER_NODE_SERVICE))
+                
+                # Argsort gives indices of highest scores
+                best_indices = np.argsort(-logits)[:K] 
+                
+                # Evaluate this "Best Strategy" explicitly
+                # We assume get_phase2_matrix_and_solve takes a LIST of indices
+                eval_cost = env.get_phase2_matrix_and_solve(best_indices.tolist())
+                
+                # Convert Indices to LKH IDs for display
+                best_lkh_ids = [i+1 for i in best_indices]
+                
+                print(
+                    f"Episode {episode:4d} | "
+                    f"Reward {r:8.3f} | "
+                    f"Eval Cost (Seconds) {eval_cost:8.0f}"
+                )
+                print(f"  > Phase 1 Strategy (Selected Nodes): {best_lkh_ids[:10]}...")
+```
+
+```{python}
+if __name__ == "__main__":
+    # Define scenarios to test
+    # Format: (Trucks, Capacity_Minutes)
+    scenarios = [
+        (3, 120),  # 3 trucks, 2 hours each
+        (5, 180),  # 5 trucks, 3 hours each (Current Baseline)
+        (8, 240)   # 8 trucks, 4 hours each
+    ]
+    
+    for k, c in scenarios:
+        print(f"\n=============================================")
+        print(f"TESTING SCENARIO: Trucks={k}, Capacity={c} min")
+        print(f"=============================================")
+        
+        # Update Global Configs
+        K_TRUCKS_PHASE1 = k
+        C_CAPACITY_PHASE1 = c
+        TOTAL_BUDGET_MINS = k * c
+        
+        # Run Training for this scenario
+        train_two_stage_vrp(num_episodes=50, print_every=10, seed=42)
+```
+
+```{python}
+
+# 5. MAIN EXECUTION
+# ==========================================
+if __name__ == "__main__":
+    # Parameters
+    SEED = 42
+    NUM_EPISODES = 50 # Start small, LKH takes ~1s per run. 50 runs = ~1 min.
+
+    print("--- DEBRIS REMOVAL OPTIMIZATION (RL + LKH) ---")
+    
+    # 1. SETUP ENV TO GET BASELINE
+    env = RealWorldEnv()
+    
+    # 2. CALCULATE INITIAL COST (NO HELP)
+    # Passing empty list [] means Phase 1 does nothing
+    print("\nCalculating Baseline (No Phase 1 Help)...")
+    initial_cost = env.get_phase2_matrix_and_solve([])
+    
+    print(f"Initial Phase 2 Cost (No Help): {initial_cost:.0f} seconds")
+    print("-" * 50)
+
+    # 3. TRAINING
+    print(f"Start Training ({NUM_EPISODES} Episodes)...")
+    print(f"Goal: Find best nodes for {K_TRUCKS_PHASE1} trucks to service in Phase 1.")
+    
+    train_two_stage_vrp(num_episodes=NUM_EPISODES, print_every=5, seed=SEED)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+import os
+import subprocess
+import re
+import pandas as pd
+import numpy as np
+import networkx as nx
+import torch
+import torch.nn as nn
+from torch.distributions import Categorical
+```
+
+
+```{python}
+
+# ==========================================
+# CONFIGURATION (MATCHING YOUR SETUP)
+# ==========================================
+BASE_DIR = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization"
+INPUT_DIR = os.path.join(BASE_DIR, "input", "QGIS", "focus area test")
+TEMP_DIR = os.path.join(BASE_DIR, "output", "rl_temp")
+LKH_EXE = r"C:\Users\leanh\Documents\GitHub\Debris-Removal-Optimization\LKHWin-3.0.13\LKHWin-3.0.13\x64\Release\LKH-3.exe"
+
+# FILES GENERATED BY YOUR SETUP SCRIPT
+EDGE_PATH = os.path.join(INPUT_DIR, "focus_area_test_edges.csv")
+NODE_PATH = os.path.join(INPUT_DIR, "focus_area_nodes.csv")
+DEPOT_PATH = os.path.join(INPUT_DIR, "focus_area_dms.csv")
+
+# PHASE 2 CONSTRAINTS (12 Hour Workday)
+DISTANCE_LIMIT_SEC = 12 * 3600  # 12 Hours
+CAPACITY_CYD = 2000             # Volume Constraint
+VEHICLES = 5
+
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+# ==========================================
+# 1. THE POLICY NETWORK
+# ==========================================
+class Phase1Policy(nn.Module):
+    def __init__(self, num_nodes):
+        super().__init__()
+        # One learnable weight per node
+        self.logits = nn.Parameter(torch.zeros(num_nodes))
+
+    def forward(self, mask):
+        # Mask out Depot or already selected nodes
+        masked_logits = self.logits.clone()
+        masked_logits[~mask] = -1e9
+        return Categorical(logits=masked_logits)
+
+# ==========================================
+# 2. THE ENVIRONMENT (REAL DATA BRIDGE)
+# ==========================================
+class RealWorldEnv:
+    def __init__(self):
+        print("Loading Real Network Data...")
+        self.df_edges = pd.read_csv(EDGE_PATH)
+        self.df_nodes = pd.read_csv(NODE_PATH)
+        self.df_depot = pd.read_csv(DEPOT_PATH)
+
+        # 1. Map QGIS IDs to LKH IDs (1..N)
+        self.osmids = self.df_nodes['osmid'].unique()
+        self.num_nodes = len(self.osmids)
+        self.osmid_to_lkh = {osmid: i+1 for i, osmid in enumerate(self.osmids)}
+        self.lkh_to_osmid = {i+1: osmid for i, osmid in enumerate(self.osmids)}
+        
+        # 2. Identify Depot (Hardcoded 5 based on your previous logs)
+        self.depot_id = 5 
+
+        # 3. Define Speeds (Seconds)
+        self.SPEED_CLEAN = (20 * 1609.34) / 3600  # 20mph
+        self.SPEED_DIRTY = (10 * 1609.34) / 3600  # 10mph
+        self.PENALTY = 3600 # 60 mins
+
+    def run_simulation(self, selected_lkh_ids):
+        """
+        1. Modifies Matrix based on selected Phase 1 nodes.
+        2. Runs LKH.
+        3. Returns Phase 2 Cost.
+        """
+        # A. Build Graph based on Phase 1 Selection
+        G = nx.Graph()
+        serviced_set = set(selected_lkh_ids)
+
+        for _, row in self.df_edges.iterrows():
+            if row['u'] in self.osmid_to_lkh and row['v'] in self.osmid_to_lkh:
+                u = self.osmid_to_lkh[row['u']]
+                v = self.osmid_to_lkh[row['v']]
+                
+                # MATHEMATICAL LINK:
+                # If node u OR v is in 'serviced_set', the edge is cleared.
+                # Cost decreases from (Dirty Speed + Penalty) to (Clean Speed).
+                is_cleared = (u in serviced_set) or (v in serviced_set)
+                
+                dist = row['length']
+                if is_cleared:
+                    weight = dist / self.SPEED_CLEAN
+                else:
+                    # Check original blockage status
+                    # If you didn't save 'blocked' column in setup, we assume random or logic here
+                    # For now, let's assume raw CSV edges are "Dirty" unless serviced
+                    weight = (dist / self.SPEED_DIRTY)
+                    # Add penalty if it was originally blocked (requires 'blocked' col in CSV)
+                    if row.get('blocked', 0) == 1:
+                        weight += self.PENALTY
+                
+                G.add_edge(u, v, weight=max(1, int(weight)))
+
+        # B. Generate Matrix (Dijkstra)
+        # We need this to write the VRP file
+        matrix_lines = []
+        for i in range(1, self.num_nodes + 1):
+            if i in G:
+                dists = nx.single_source_dijkstra_path_length(G, i, weight='weight')
+                row = [str(int(dists.get(j, 999999))) if i != j else "0" for j in range(1, self.num_nodes + 1)]
+            else:
+                row = ["999999"] * self.num_nodes
+            matrix_lines.append(" ".join(row))
+
+        # C. Write VRP File
+        vrp_path = os.path.join(TEMP_DIR, "rl_phase2.vrp")
+        with open(vrp_path, "w") as f:
+            f.write(f"NAME : RL_Phase2\nTYPE : CVRP\nDIMENSION : {self.num_nodes}\n")
+            f.write(f"VEHICLES : {VEHICLES}\nCAPACITY : {CAPACITY_CYD}\n")
+            f.write(f"DISTANCE : {DISTANCE_LIMIT_SEC}\n") # 12 Hour Constraint
+            f.write("EDGE_WEIGHT_TYPE : EXPLICIT\nEDGE_WEIGHT_FORMAT : FULL_MATRIX\n")
+            f.write("DEPOT_SECTION\n5\n-1\nDEMAND_SECTION\n")
+            # Dummy demand for routing (or read from loads csv if available)
+            for i in range(1, self.num_nodes+1): f.write(f"{i} 10\n")
+            f.write("EDGE_WEIGHT_SECTION\n")
+            f.write("\n".join(matrix_lines))
+            f.write("\nEOF")
+
+        # D. Run LKH
+        par_path = os.path.join(TEMP_DIR, "rl.par")
+        with open(par_path, "w") as f:
+            f.write(f"PROBLEM_FILE = {vrp_path}\nRUNS = 1\nTOUR_FILE = {vrp_path}.tour\nTRACE_LEVEL=0")
+        
+        try:
+            res = subprocess.run([LKH_EXE, par_path], capture_output=True, text=True)
+            match = re.search(r"Cost.[\s]*(\d+)", res.stdout)
+            return float(match.group(1)) if match else 1e9
+        except:
+            return 1e9
+
+# ==========================================
+# 3. TRAINING LOOP
+# ==========================================
+def train():
+    env = RealWorldEnv()
+    policy = Phase1Policy(env.num_nodes)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=0.05)
+    
+    # PARAMETERS
+    EPISODES = 50
+    NODES_TO_SELECT = 10 # Budget: Phase 1 can only service 10 nodes
+    baseline = None
+
+    print(f"--- Starting Training on {env.num_nodes} Nodes ---")
+
+    for ep in range(EPISODES):
+        optimizer.zero_grad()
+        
+        # 1. Select Nodes (Phase 1)
+        mask = torch.ones(env.num_nodes, dtype=torch.bool)
+        mask[env.depot_id - 1] = False # Don't select depot
+        
+        actions = []
+        log_probs = []
+        
+        for _ in range(NODES_TO_SELECT):
+            dist = policy(mask)
+            action = dist.sample()
+            
+            actions.append(action.item() + 1) # Convert to LKH ID
+            log_probs.append(dist.log_prob(action))
+            mask[action] = False
+            
+        # 2. Get Reward (Run LKH Phase 2)
+        cost = env.run_simulation(actions)
+        reward = -cost / 1000.0 # Scale down
+        
+        # 3. Update Policy
+        if baseline is None: baseline = reward
+        else: baseline = 0.9 * baseline + 0.1 * reward
+        
+        loss = -torch.stack(log_probs).sum() * (reward - baseline)
+        loss.backward()
+        optimizer.step()
+        
+        print(f"Ep {ep+1} | Cost: {int(cost)} | Selected: {actions[:3]}...")
+
+if __name__ == "__main__":
+    train()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{python}
+import math
+import random
+from dataclasses import dataclass
+from typing import List, Tuple
+
+import numpy as np
+import torch
+from torch import nn
+from torch.distributions import Categorical
+```
+
+```{python}
+# ----------------------------
+# Problem definition & VRP heuristic
+# ----------------------------
+
+@dataclass
+class VRPInstance:
+    coords: np.ndarray  # shape [N, 2]
+    demand: np.ndarray  # shape [N]
+    capacity: float
+    depot: int = 0
+
+
+def generate_simple_instance(num_customers: int = 20, seed: int = 0) -> VRPInstance:
+    """
+    Generate a toy VRP instance:
+      - Single depot (node 0)
+      - num_customers customers
+      - Random coordinates in [0,10]^2
+      - Random integer demands in [1,9]
+      - Single vehicle capacity 30
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    N = num_customers + 1  # include depot
+    coords = np.random.rand(N, 2) * 10.0
+    demand = np.zeros(N)
+    demand[1:] = np.random.randint(1, 10, size=num_customers)
+    capacity = 30.0
+    return VRPInstance(coords=coords, demand=demand, capacity=capacity, depot=0)
+
+
+def euclidean_distance(p: np.ndarray, q: np.ndarray) -> float:
+    return float(np.linalg.norm(p - q))
+
+
+def compute_distance_matrix(coords: np.ndarray) -> np.ndarray:
+    N = coords.shape[0]
+    dist = np.zeros((N, N), dtype=float)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                dist[i, j] = 0.0
+            else:
+                dist[i, j] = euclidean_distance(coords[i], coords[j])
+    return dist
+
+def solve_vrp_greedy_with_matrix(
+    dist_matrix: np.ndarray,
+    demand: np.ndarray,
+    capacity: float,
+    depot: int = 0,
+) -> Tuple[float, List[List[int]]]:
+    """
+    Same greedy VRP heuristic as before, but uses a precomputed distance matrix.
+    """
+    N = len(demand)
+    Q = capacity
+
+    remaining = set(i for i in range(N) if i != depot and demand[i] > 0)
+    routes: List[List[int]] = []
+    total_dist = 0.0
+
+    while remaining:
+        route = [depot]
+        load = 0.0
+        current = depot
+        while True:
+            feasible_customers = [i for i in remaining if load + demand[i] <= Q]
+            if not feasible_customers:
+                # return to depot and end this route
+                total_dist += dist_matrix[current, depot]
+                route.append(depot)
+                break
+            # choose nearest feasible customer
+            next_c = min(
+                feasible_customers,
+                key=lambda j: dist_matrix[current, j],
+            )
+            total_dist += dist_matrix[current, next_c]
+            route.append(next_c)
+            load += demand[next_c]
+            current = next_c
+            remaining.remove(next_c)
+        routes.append(route)
+
+    return total_dist, routes
+
+
+```
+
+
+
+```{python}
+
+# ----------------------------
+# Policy: Stage-1 node selection
+# ----------------------------
+
+class NodeSelectionPolicy(nn.Module):
+    """
+    Simple policy: maintains a score per customer (excluding depot).
+    At each selection step, chooses one customer among those not yet chosen
+    using a softmax over their scores.
+    """
+
+    def __init__(self, num_customers: int):
+        super().__init__()
+        # Parameter vector of size num_customers
+        self.logits = nn.Parameter(torch.zeros(num_customers))
+
+    def forward(self, available_mask: torch.Tensor) -> Categorical:
+        """
+        available_mask: bool tensor of shape [num_customers], True if the customer is still selectable.
+        Returns a Categorical over available indices (0..num_customers-1).
+        """
+        masked_logits = self.logits.clone()
+        masked_logits[~available_mask] = -1e9  # mask out unavailable nodes
+        return Categorical(logits=masked_logits)
+```
+
+
+```{python}
+# ----------------------------
+# Two-stage episode: selection + VRP
+# ----------------------------
+
+def run_episode(
+    instance: VRPInstance,
+    policy: NodeSelectionPolicy,
+    base_dist_matrix: np.ndarray,
+    cost_reduction_fraction: float = 0.2,  # 20% travel cost cut
+    select_fraction: float = 0.1,          # select ~10% customers
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    One episode:
+
+      Stage 1 (RL):
+        - Policy selects K customers.
+
+      Stage 2 (VRP):
+        - For all edges incident to these customers, reduce travel cost by 20%.
+        - Solve VRP with greedy heuristic on the modified distance matrix.
+        - Reward = - (total distance under modified costs).
+    """
+    N = len(instance.demand)
+    num_customers = N - 1
+    K = max(1, int(round(select_fraction * num_customers)))
+
+    # available tracks which customers are still selectable
+    available = torch.ones(num_customers, dtype=torch.bool)
+    actions = []
+    log_probs = []
+
+    # Select K customers sequentially without replacement
+    for _ in range(K):
+        dist = policy(available)
+        action = dist.sample()  # index in [0, num_customers-1], representing customer (index + 1)
+        log_probs.append(dist.log_prob(action))
+        actions.append(int(action.item()))
+        available[action] = False
+
+    # Copy the base distance matrix and apply cost reduction around selected customers
+    dist_matrix = base_dist_matrix.copy()
+    alpha = 1.0 - cost_reduction_fraction  # 0.8 if cost_reduction_fraction = 0.2
+
+    for a in actions:
+        node_idx = a + 1  # customers are 1..N-1
+        # All edges to/from this node become cheaper by 20%
+        dist_matrix[node_idx, :] *= alpha
+        dist_matrix[:, node_idx] *= alpha
+
+    # Demand unchanged in this variant
+    demand = instance.demand
+
+    # Stage 2: solve VRP with greedy heuristic using modified costs
+    total_dist, _ = solve_vrp_greedy_with_matrix(
+        dist_matrix=dist_matrix,
+        demand=demand,
+        capacity=instance.capacity,
+        depot=instance.depot,
+    )
+    reward = torch.tensor(-total_dist, dtype=torch.float32)  # still minimizing distance
+
+    log_prob_sum = torch.stack(log_probs).sum()
+    return log_prob_sum, reward
+
+
+
+
+```
+
+
+```{python}
+# ----------------------------
+# Training loop (REINFORCE)
+# ----------------------------
+def train_two_stage_vrp(
+    num_episodes: int = 200,
+    print_every: int = 20,
+    seed: int = 0,
+) -> None:
+    instance = generate_simple_instance(num_customers=20, seed=seed)
+    num_customers = len(instance.demand) - 1
+
+    # Precompute base distance matrix
+    base_dist_matrix = compute_distance_matrix(instance.coords)
+
+    policy = NodeSelectionPolicy(num_customers=num_customers)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=0.1)
+
+    baseline = None
+
+    for episode in range(1, num_episodes + 1):
+        optimizer.zero_grad()
+        log_prob_sum, reward = run_episode(
+            instance,
+            policy,
+            base_dist_matrix=base_dist_matrix,
+            cost_reduction_fraction=0.2,  # 20% edge cost cut
+            select_fraction=0.1,
+        )
+
+        r = reward.item()
+        if baseline is None:
+            baseline = r
+        else:
+            baseline = 0.9 * baseline + 0.1 * r
+
+        advantage = reward - baseline
+        loss = -log_prob_sum * advantage
+
+        loss.backward()
+        optimizer.step()
+
+        if episode % print_every == 0 or episode == 1:
+            with torch.no_grad():
+                logits = policy.logits.detach().cpu().numpy()
+                K = max(1, int(round(0.1 * num_customers)))
+                best_indices = np.argsort(-logits)[:K]
+
+                # Build eval distance matrix with cost reductions
+                eval_dist = base_dist_matrix.copy()
+                alpha = 0.8  # 20% cost cut
+                for a in best_indices:
+                    node_idx = a + 1
+                    eval_dist[node_idx, :] *= alpha
+                    eval_dist[:, node_idx] *= alpha
+
+                total_dist, routes = solve_vrp_greedy_with_matrix(
+                    dist_matrix=eval_dist,
+                    demand=instance.demand,
+                    capacity=instance.capacity,
+                    depot=instance.depot,
+                )
+                print(
+                    f"Episode {episode:4d} | "
+                    f"Reward {r:8.3f} | Baseline {baseline:8.3f} | "
+                    f"Eval distance {total_dist:8.3f}"
+                )
+                print(f"  Selected (eval) customers: {best_indices.tolist()}")
+                print(f"  Routes: {routes}")
+
+
+
+# if __name__ == "__main__":
+#     # Quick demo run
+#     train_two_stage_vrp(num_episodes=200, print_every=10)
+```
+
+
+```{python}
+if __name__ == "__main__":
+    # 1. SETUP: Define parameters
+    SEED = 42
+    NUM_EPISODES = 500
+    
+    print("--- GENERATING TEST INSTANCE ---")
+    # Generate the fixed test network
+    test_instance = generate_simple_instance(num_customers=20, seed=SEED)
+    base_dist_matrix = compute_distance_matrix(test_instance.coords)
+    
+    # 2. BASELINE: Calculate cost WITHOUT Phase 1 selection (No cost reduction)
+    # We pass the original matrix to the solver
+    initial_dist, initial_routes = solve_vrp_greedy_with_matrix(
+        dist_matrix=base_dist_matrix, 
+        demand=test_instance.demand, 
+        capacity=test_instance.capacity, 
+        depot=test_instance.depot
+    )
+    print(f"Initial Cost (No Phase 1 Help): {initial_dist:.3f}")
+    print(f"Initial Routes: {initial_routes}\n")
+
+    # 3. TRAINING: Run the RL loop
+    print(f"--- STARTING TRAINING ({NUM_EPISODES} Episodes) ---")
+    # We modify the train function slightly to return the trained policy
+    # (Or simply instantiate and train it here, but let's run the function as is
+    # and rely on the print statements inside it to see progress).
+    
+    # To properly extract the trained policy, we ideally should refactor 'train_two_stage_vrp'
+    # to return the policy. However, to keep it simple, we will just run the training
+    # which prints the improvement over time.
+    
+    train_two_stage_vrp(num_episodes=NUM_EPISODES, print_every=50, seed=SEED)
+    
+    print("\n--- INTERPRETING RESULTS ---")
+    print("Look at the last 'Eval distance' printed above.")
+    print("If Final Eval Distance < Initial Cost, the RL successfully learned")
+    print("which nodes to prioritize in Phase 1 to lower the Phase 2 routing cost.")
+```
